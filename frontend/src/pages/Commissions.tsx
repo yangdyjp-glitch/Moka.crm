@@ -83,11 +83,14 @@ const REBATE_STATUS_COLOR: Record<string, string> = {
   未到账: 'default',
   部分自扣: 'gold',
   已自扣: 'blue',
-  未返佣: 'orange',
-  部分返佣: 'gold',
+  未返佣: 'red',
+  部分返佣: 'orange',
+  已部分返佣: 'orange',
   已返佣: 'green',
   无返佣: 'green',
 }
+const rebateStatusLabel = (status: string) =>
+  status === '部分返佣' ? '已部分返佣' : status
 const isSelfDeducted = (r: CommissionRow) =>
   r.fundSettlementMode === 'AGENT_NET' || r.status === 'SELF_DEDUCTED'
 
@@ -245,7 +248,11 @@ export default function Commissions() {
     [cashData.items],
   )
   const cashRebateStatusFilters = useMemo(
-    () => uniqueFilters(cashData.items, (r) => r.rebateStatus),
+    () => uniqueFilters(
+      cashData.items,
+      (r) => r.rebateStatus,
+      (r) => rebateStatusLabel(r.rebateStatus),
+    ),
     [cashData.items],
   )
   const cashFundModeFilters = useMemo(
@@ -414,7 +421,9 @@ export default function Commissions() {
           width: COL.status,
           filters: cashRebateStatusFilters,
           onFilter: (value, r) => filterValue(r.rebateStatus) === value,
-          render: (s: string) => <Tag color={REBATE_STATUS_COLOR[s]}>{s}</Tag>,
+          render: (s: string) => (
+            <Tag color={REBATE_STATUS_COLOR[s]}>{rebateStatusLabel(s)}</Tag>
+          ),
         },
         {
           title: '资金模式',

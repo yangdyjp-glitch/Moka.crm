@@ -577,10 +577,16 @@ export class CommissionsService {
                 ? '已自扣'
                 : '部分自扣';
         } else {
-          if (commission.status === CommissionStatus.PAID) {
+          const paidCommissionAmount = roundMoney(
+            Math.max(0, Number(commission.paidAmount)),
+          );
+          const unpaidCommissionAmount = roundMoney(
+            Math.max(0, payableAmount - paidCommissionAmount),
+          );
+          if (paidCommissionAmount > 0 && unpaidCommissionAmount > 0) {
+            rebateStatus = '已部分返佣';
+          } else if (paidCommissionAmount > 0) {
             rebateStatus = '已返佣';
-          } else if (Number(commission.paidAmount) > 0) {
-            rebateStatus = '部分返佣';
           } else {
             rebateStatus = '未返佣';
           }
