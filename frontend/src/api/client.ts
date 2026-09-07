@@ -1,17 +1,34 @@
-import axios from 'axios';
+import axios, {
+  type AxiosInstance,
+  type AxiosRequestConfig,
+  type AxiosResponse,
+} from 'axios';
 
 // 生产环境用 VITE_API_BASE（指向后端公网地址 + /api）；开发用 vite 代理的 /api
-const baseURL = (import.meta.env as any).VITE_API_BASE || '/api';
+const baseURL = import.meta.env.VITE_API_BASE || '/api';
 
-const client = axios.create({ baseURL });
+export interface ApiRequestConfig<D = unknown> extends AxiosRequestConfig<D> {
+  noCache?: boolean;
+}
 
-client.interceptors.request.use((config) => {
+type ApiClient = Omit<AxiosInstance, 'get'> & {
+  get<T = unknown, D = unknown>(
+    url: string,
+    config?: ApiRequestConfig<D>,
+  ): Promise<AxiosResponse<T, D>>;
+};
+
+const axiosClient = axios.create({ baseURL });
+const client = axiosClient as ApiClient;
+const rawGet = axiosClient.get.bind(axiosClient);
+
+axiosClient.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
-client.interceptors.response.use(
+axiosClient.interceptors.response.use(
   (r) => r,
   (err) => {
     if (
@@ -28,36 +45,56 @@ client.interceptors.response.use(
 
 // ===== GET 响应缓存 =====
 // 页面间切换直接走缓存、不重复请求；任何写操作后自动失效；浏览器主动刷新（清空内存）才会重新加载。
-type CacheEntry = { t: number; data: unknown };
+type CacheEntry = { t: number; response: AxiosResponse<unknown> };
 const getCache = new Map<string, CacheEntry>();
+const cacheRequestVersions = new Map<string, number>();
 const CACHE_TTL = 30 * 60 * 1000; // 30 分钟
+let cacheGeneration = 0;
 
-const rawGet = client.get.bind(client);
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(client as any).get = (url: string, config?: any) => {
+client.get = async function cachedGet<T = unknown, D = unknown>(
+  url: string,
+  config?: ApiRequestConfig<D>,
+): Promise<AxiosResponse<T, D>> {
   // blob 下载、或显式 noCache 不走缓存
-  if (config?.responseType === 'blob' || config?.noCache) return rawGet(url, config);
+  if (config?.responseType === 'blob' || config?.noCache) {
+    return rawGet<T, AxiosResponse<T, D>, D>(url, config);
+  }
   const key = url + '|' + JSON.stringify(config?.params ?? {});
+  if (config?.signal?.aborted) {
+    throw new axios.CanceledError('canceled');
+  }
   const hit = getCache.get(key);
   if (hit && Date.now() - hit.t < CACHE_TTL) {
-    return Promise.resolve({ data: hit.data, status: 200, statusText: 'OK', headers: {}, config: config ?? {} });
+    return hit.response as AxiosResponse<T, D>;
   }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return rawGet(url, config).then((res: any) => {
-    getCache.set(key, { t: Date.now(), data: res.data });
-    return res;
-  });
+  const requestVersion = (cacheRequestVersions.get(key) ?? 0) + 1;
+  cacheRequestVersions.set(key, requestVersion);
+  const requestGeneration = cacheGeneration;
+  const response = await rawGet<T, AxiosResponse<T, D>, D>(url, config);
+  // A GET that started before a successful write must not repopulate stale cache data.
+  if (
+    requestGeneration === cacheGeneration &&
+    cacheRequestVersions.get(key) === requestVersion
+  ) {
+    getCache.set(key, {
+      t: Date.now(),
+      response: response as AxiosResponse<unknown>,
+    });
+  }
+  return response;
 };
 
 // 写操作（POST/PUT/PATCH/DELETE）成功后清空缓存，保证数据不陈旧
-client.interceptors.response.use((res) => {
-  if ((res.config.method ?? 'get').toLowerCase() !== 'get') getCache.clear();
+axiosClient.interceptors.response.use((res) => {
+  if ((res.config.method ?? 'get').toLowerCase() !== 'get') clearApiCache();
   return res;
 });
 
 /** 手动清空接口缓存（供"刷新"按钮等调用） */
 export function clearApiCache() {
+  cacheGeneration += 1;
   getCache.clear();
+  cacheRequestVersions.clear();
 }
 
 /** 带鉴权地下载文件（导出 / 附件），用 blob 触发浏览器保存 */

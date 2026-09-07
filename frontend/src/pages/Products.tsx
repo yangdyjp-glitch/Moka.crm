@@ -13,27 +13,54 @@ import {
   message,
 } from 'antd'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { CURRENCY_LABEL, fmtMoney } from '../api/types'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps } from '../components/tableLayout'
 
-type Any = Record<string, any>
+type ProductRow = {
+  id: number
+  name: string
+  category?: string | null
+  standardPrice: number | string
+  currency: string
+  participateCommission: boolean
+  allowDiscount: boolean
+  status: string
+}
+
+type ProductForm = Omit<ProductRow, 'id'>
+
+const fetchProducts = (signal?: AbortSignal) =>
+  client.get<ProductRow[]>('/products', { params: { all: 1 }, signal })
 
 export default function Products() {
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const [rows, setRows] = useState<ProductRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [reloadKey, setReloadKey] = useState(0)
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [editing, setEditing] = useState<Any | null>(null)
-  const [form] = Form.useForm()
+  const [editing, setEditing] = useState<ProductRow | null>(null)
+  const [form] = Form.useForm<ProductForm>()
 
-  const load = () => {
+  const reload = () => {
     setLoading(true)
-    client.get('/products', { params: { all: 1 } }).then((r) => setRows(r.data)).finally(() => setLoading(false))
+    setReloadKey((current) => current + 1)
   }
-  useEffect(load, [])
+  useEffect(() => {
+    const controller = new AbortController()
+    let active = true
+    void fetchProducts(controller.signal)
+      .then((response) => { if (active) setRows(response.data) })
+      .catch((error: unknown) => { if (active) message.error(apiErrorMessage(error, '项目数据加载失败')) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [reloadKey])
 
-  const openForm = (rec?: Any) => {
+  const openForm = (rec?: ProductRow) => {
     setEditing(rec || null)
     form.resetFields()
     if (rec) form.setFieldsValue({ ...rec, standardPrice: rec.standardPrice != null ? Number(rec.standardPrice) : undefined })
@@ -48,9 +75,9 @@ export default function Products() {
       else await client.post('/products', v)
       message.success('已保存')
       setOpen(false)
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+      reload()
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -59,16 +86,16 @@ export default function Products() {
     try {
       await client.delete(`/products/${id}`)
       message.success('已删除')
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+      reload()
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={() => openForm()}>新增项目</Button>
-      <Table
+      <Table<ProductRow>
         {...scrollTableProps}
         rowKey="id"
         loading={loading}

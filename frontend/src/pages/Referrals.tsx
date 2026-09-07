@@ -14,32 +14,66 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { CURRENCY_LABEL, fmtMoney } from '../api/types'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, pageTableProps } from '../components/tableLayout'
 
-type Any = Record<string, any>
+type ReferralRow = {
+  id: number
+  customer?: { id: number; name: string } | null
+  serviceType: string
+  downstreamCompany: string
+  commissionAmount: number | string
+  currency: string
+  settlementDate?: string | null
+  collectionStatus: 'PENDING' | 'COLLECTED'
+}
+
+type CustomerOption = { id: number; name: string }
+
+type ReferralForm = {
+  customerId: number
+  serviceType: string
+  downstreamCompany: string
+  commissionAmount: number
+  currency: string
+  settlementDate?: string
+}
 
 const SERVICE_TYPES = ['住房', '电话卡', '保险', '其他']
+const fetchReferrals = (signal?: AbortSignal) => client.get<ReferralRow[]>('/referrals', { signal })
 
 export default function Referrals() {
   const nav = useNavigate()
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const [rows, setRows] = useState<ReferralRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [reloadKey, setReloadKey] = useState(0)
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [form] = Form.useForm()
-  const [customers, setCustomers] = useState<Any[]>([])
+  const [form] = Form.useForm<ReferralForm>()
+  const [customers, setCustomers] = useState<CustomerOption[]>([])
 
-  const load = () => {
+  const reload = () => {
     setLoading(true)
-    client.get('/referrals').then((r) => setRows(r.data)).finally(() => setLoading(false))
+    setReloadKey((current) => current + 1)
   }
-  useEffect(load, [])
+  useEffect(() => {
+    const controller = new AbortController()
+    let active = true
+    void fetchReferrals(controller.signal)
+      .then((response) => { if (active) setRows(response.data) })
+      .catch((error: unknown) => { if (active) message.error(apiErrorMessage(error, '转介绍数据加载失败')) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [reloadKey])
 
   const openCreate = async () => {
     form.resetFields()
-    const c = await client.get('/customers', { params: { pageSize: 100 } })
+    const c = await client.get<{ items: CustomerOption[] }>('/customers', { params: { pageSize: 100 } })
     setCustomers(c.data.items)
     setOpen(true)
   }
@@ -50,31 +84,31 @@ export default function Referrals() {
       await client.post('/referrals', { ...v, settlementDate: v.settlementDate || undefined })
       message.success('已登记')
       setOpen(false)
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+      reload()
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
   }
   const toggle = async (id: number, action: 'collect' | 'uncollect') => {
     await client.post(`/referrals/${id}/${action}`)
-    load()
+    reload()
   }
   const del = async (id: number) => {
     try {
       await client.delete(`/referrals/${id}`)
       message.success('已删除')
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+      reload()
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={openCreate}>登记转介绍收佣</Button>
-      <Table
+      <Table<ReferralRow>
         {...pageTableProps}
         rowKey="id"
         loading={loading}

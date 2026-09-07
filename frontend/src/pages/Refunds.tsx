@@ -11,10 +11,12 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   message,
 } from 'antd'
 import dayjs from 'dayjs'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps } from '../components/tableLayout'
 import { useAuth } from '../auth/AuthContext'
@@ -28,14 +30,45 @@ import {
 } from '../api/types'
 import { moneyOut } from '../api/money'
 
-type Any = Record<string, any>
+type RefundRow = {
+  id: number
+  refundNo: string
+  appliedAt?: string | null
+  createdAt: string
+  completedAt?: string | null
+  customer?: { id: number; name: string } | null
+  nominalAmount: number | string
+  cashAmount: number | string
+  offsetAmount: number | string
+  reason: string
+  bearer: string
+  status: string
+}
+
+type OrderOption = {
+  id: number
+  orderNo: string
+  status: string
+  receivableAmount: number | string
+  customer?: { name: string } | null
+}
+
+type RefundForm = {
+  orderId: number
+  refundPercent: number
+  reason: string
+  reasonNote?: string
+  bearer: string
+  appliedAt?: string
+}
+
 const EMPTY_FILTER = '__EMPTY__'
 
-function arrivalMonthValue(r: Any) {
+function arrivalMonthValue(r: RefundRow) {
   return r.completedAt ? dayjs(r.completedAt).format('YYYY-MM') : EMPTY_FILTER
 }
 
-function monthFilters(rows: Any[]) {
+function monthFilters(rows: RefundRow[]) {
   const values = Array.from(new Set(rows.map(arrivalMonthValue)))
   return values
     .sort((a, b) => {
@@ -46,28 +79,42 @@ function monthFilters(rows: Any[]) {
     .map((value) => ({ value, text: value === EMPTY_FILTER ? '未到账' : value }))
 }
 
+const fetchRefunds = (signal?: AbortSignal) => client.get<RefundRow[]>('/refunds', { signal })
+
 export default function Refunds() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'ADMIN'
   const nav = useNavigate()
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const [rows, setRows] = useState<RefundRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [reloadKey, setReloadKey] = useState(0)
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [form] = Form.useForm()
-  const [orders, setOrders] = useState<Any[]>([])
+  const [form] = Form.useForm<RefundForm>()
+  const [orders, setOrders] = useState<OrderOption[]>([])
 
-  const load = () => {
+  const reload = () => {
     setLoading(true)
-    client.get('/refunds').then((r) => setRows(r.data)).finally(() => setLoading(false))
+    setReloadKey((current) => current + 1)
   }
-  useEffect(load, [])
+  useEffect(() => {
+    const controller = new AbortController()
+    let active = true
+    void fetchRefunds(controller.signal)
+      .then((response) => { if (active) setRows(response.data) })
+      .catch((error: unknown) => { if (active) message.error(apiErrorMessage(error, '退款数据加载失败')) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [reloadKey])
 
   const openCreate = async () => {
     form.resetFields()
     form.setFieldsValue({ bearer: 'COMPANY', refundPercent: 100, appliedAt: todayDate() })
-    const o = await client.get('/orders', { params: { all: 1 } })
-    setOrders(o.data.items.filter((x: Any) => !['REFUNDED', 'CANCELLED'].includes(x.status)))
+    const o = await client.get<{ items: OrderOption[] }>('/orders', { params: { all: 1 } })
+    setOrders(o.data.items.filter((order) => !['REFUNDED', 'CANCELLED'].includes(order.status)))
     setOpen(true)
   }
 
@@ -85,9 +132,9 @@ export default function Refunds() {
       })
       message.success('已提交退款申请（待管理员执行）')
       setOpen(false)
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+      reload()
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -96,16 +143,16 @@ export default function Refunds() {
   const act = async (id: number, action: 'approve' | 'reject' | 'pay') => {
     await client.post(`/refunds/${id}/${action}`)
     message.success(action === 'approve' ? '已审核' : action === 'pay' ? '已支付退款' : '已拒绝')
-    load()
+    reload()
   }
 
   const doRemove = async (id: number) => {
     try {
       await client.delete(`/refunds/${id}`)
       message.success('已删除')
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+      reload()
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
@@ -114,7 +161,7 @@ export default function Refunds() {
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={openCreate}>发起退款</Button>
-      <Table
+      <Table<RefundRow>
         {...scrollTableProps}
         className="refunds-list-table full-height-list-table"
         rowKey="id"
@@ -122,13 +169,13 @@ export default function Refunds() {
         dataSource={rows}
         columns={[
           { title: '退款号', dataIndex: 'refundNo', width: COL.no },
-          { title: '登记时间', dataIndex: 'appliedAt', width: COL.date, render: (t: string, r: Any) => fmtDate(t ?? r.createdAt) },
+          { title: '登记时间', dataIndex: 'appliedAt', width: COL.date, render: (t: string | null, r) => fmtDate(t ?? r.createdAt) },
           {
             title: '到账时间',
             dataIndex: 'completedAt',
             width: COL.date,
             filters: arrivalMonthFilters,
-            onFilter: (value: any, r) => arrivalMonthValue(r) === value,
+            onFilter: (value, r) => arrivalMonthValue(r) === String(value),
             render: fmtDate,
           },
           { title: '客户', width: COL.person, render: (_, r) => <a onClick={() => nav(`/customers/${r.customer?.id}`)}>{r.customer?.name}</a> },
@@ -159,12 +206,15 @@ export default function Refunds() {
                     <ActionBtn tone="confirm">支付</ActionBtn>
                   </Popconfirm>
                 )}
-                {isAdmin && (
-                  <DeleteBtn
-                    title={r.status === 'REFUNDED' ? '该退款已执行，删除会回退订单退款额（佣金/台账请人工复核）。确定删除？' : '确认删除该退款记录？'}
-                    onConfirm={() => doRemove(r.id)}
-                  />
-                )}
+                {isAdmin && (r.status === 'REFUNDED' ? (
+                  <Tooltip title="该退款已执行，为保留财务审计链，不允许删除">
+                    <span>
+                      <DeleteBtn disabled onConfirm={() => doRemove(r.id)}>不可删除</DeleteBtn>
+                    </span>
+                  </Tooltip>
+                ) : (
+                  <DeleteBtn title="确认删除该退款记录？" onConfirm={() => doRemove(r.id)} />
+                ))}
               </Space>
             ),
           },

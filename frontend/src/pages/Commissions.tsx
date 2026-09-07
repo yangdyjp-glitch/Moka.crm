@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Modal, Select, Space, Table, Tabs, Tag, message } from 'antd'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps } from '../components/tableLayout'
 import {
@@ -11,8 +12,70 @@ import {
   fmtMoney,
 } from '../api/types'
 
-type Any = Record<string, any>
+type MoneyValue = number | string
+
+interface CommissionRow {
+  id: number
+  recordKey: string
+  customer?: { name?: string | null } | null
+  order?: { orderNo?: string | null } | null
+  paymentId?: number | null
+  paymentNo?: string | null
+  paymentRemark?: string | null
+  channelNameSnapshot?: string | null
+  fundSettlementMode: string
+  currency: string
+  payableAmount: MoneyValue
+  paidAmount: MoneyValue
+  status: string
+  suspended?: boolean
+  isPaymentInstallment?: boolean
+  parentStatus?: string
+  installmentIndex?: number
+}
+
+interface CashAccountRow {
+  orderId: number
+  customerName: string
+  channelName?: string | null
+  rebateStatus: string
+  fundSettlementMode: string
+  currency: string
+  contractAmount: MoneyValue
+  actualReceived: MoneyValue
+  balance: MoneyValue
+}
+
+interface ListResponse<T> {
+  items: T[]
+  total: number
+}
+
+interface PayResponse {
+  paymentNo?: string | null
+  payable: MoneyValue
+  offset: MoneyValue
+  cashOut: MoneyValue
+}
+
+type CommissionAction = 'pay' | 'review' | 'resume' | 'suspend' | 'cancel'
 const EMPTY_FILTER = '__EMPTY__'
+
+async function requestCommissions(selectedStatus?: string, signal?: AbortSignal) {
+  const { data } = await client.get<ListResponse<CommissionRow>>('/commissions', {
+    params: { all: 1, status: selectedStatus },
+    signal,
+  })
+  return data
+}
+
+async function requestCashAccounts(signal?: AbortSignal) {
+  const { data } = await client.get<ListResponse<CashAccountRow>>(
+    '/commissions/cash-accounts',
+    { params: { all: 1 }, signal },
+  )
+  return data
+}
 
 const CONFIRMABLE_STATUS = ['PENDING_REVIEW', 'PENDING_PAYMENT']
 const FINAL_STATUS = ['PAID', 'CANCELLED', 'SELF_DEDUCTED']
@@ -25,10 +88,10 @@ const REBATE_STATUS_COLOR: Record<string, string> = {
   已返佣: 'green',
   无返佣: 'green',
 }
-const isSelfDeducted = (r: Any) =>
+const isSelfDeducted = (r: CommissionRow) =>
   r.fundSettlementMode === 'AGENT_NET' || r.status === 'SELF_DEDUCTED'
 
-const canConfirmPayment = (r: Any) =>
+const canConfirmPayment = (r: CommissionRow) =>
   r.fundSettlementMode === 'COMPANY_REBATE' &&
   CONFIRMABLE_STATUS.includes(r.status) &&
   !r.suspended
@@ -41,7 +104,7 @@ function filterText(v: unknown) {
   return v == null || v === '' ? '—' : String(v)
 }
 
-function uniqueFilters(rows: Any[], getValue: (row: Any) => unknown, getText: (row: Any) => unknown = getValue) {
+function uniqueFilters<T>(rows: T[], getValue: (row: T) => unknown, getText: (row: T) => unknown = getValue) {
   const seen = new Map<string, string>()
   rows.forEach((row) => {
     const value = filterValue(getValue(row))
@@ -53,32 +116,94 @@ function uniqueFilters(rows: Any[], getValue: (row: Any) => unknown, getText: (r
 }
 
 export default function Commissions() {
-  const [data, setData] = useState<{ items: Any[]; total: number }>({ items: [], total: 0 })
+  const [data, setData] = useState<ListResponse<CommissionRow>>({ items: [], total: 0 })
   const [status, setStatus] = useState<string>()
-  const [loading, setLoading] = useState(false)
-  const [cashData, setCashData] = useState<{ items: Any[]; total: number }>({ items: [], total: 0 })
-  const [cashLoading, setCashLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [reloadKey, setReloadKey] = useState(0)
+  const [cashData, setCashData] = useState<ListResponse<CashAccountRow>>({ items: [], total: 0 })
+  const [cashLoading, setCashLoading] = useState(true)
+  const settlementRequestId = useRef(0)
+  const cashRequestId = useRef(0)
 
   const load = () => {
     setLoading(true)
-    client.get('/commissions', { params: { all: 1, status } }).then((r) => setData(r.data)).finally(() => setLoading(false))
+    setReloadKey((key) => key + 1)
   }
 
   const loadCash = () => {
+    const requestId = ++cashRequestId.current
     setCashLoading(true)
-    client.get('/commissions/cash-accounts', { params: { all: 1 } }).then((r) => setCashData(r.data)).finally(() => setCashLoading(false))
+    void requestCashAccounts()
+      .then((response) => {
+        if (requestId === cashRequestId.current) setCashData(response)
+      })
+      .catch((error: unknown) => {
+        if (requestId === cashRequestId.current) {
+          message.error(apiErrorMessage(error, '现金账目加载失败'))
+        }
+      })
+      .finally(() => {
+        if (requestId === cashRequestId.current) setCashLoading(false)
+      })
   }
 
-  useEffect(load, [status])
-  useEffect(loadCash, [])
+  useEffect(() => {
+    const controller = new AbortController()
+    const requestId = ++settlementRequestId.current
+    void requestCommissions(status, controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted && requestId === settlementRequestId.current) {
+          setData(response)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && requestId === settlementRequestId.current) {
+          message.error(apiErrorMessage(error, '分成数据加载失败'))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestId === settlementRequestId.current) {
+          setLoading(false)
+        }
+      })
+    return () => controller.abort()
+  }, [reloadKey, status])
 
-  const act = async (row: Any, action: string) => {
+  useEffect(() => {
+    const controller = new AbortController()
+    const requestId = ++cashRequestId.current
+    void requestCashAccounts(controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted && requestId === cashRequestId.current) {
+          setCashData(response)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && requestId === cashRequestId.current) {
+          message.error(apiErrorMessage(error, '现金账目加载失败'))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestId === cashRequestId.current) {
+          setCashLoading(false)
+        }
+      })
+    return () => controller.abort()
+  }, [])
+
+  const changeStatus = (nextStatus?: string) => {
+    if (nextStatus === status) return
+    setLoading(true)
+    setStatus(nextStatus)
+  }
+
+  const act = async (row: CommissionRow, action: CommissionAction) => {
     try {
       const endpoint =
         action === 'pay' && row.paymentId
           ? `/commissions/${row.id}/pay-installment/${row.paymentId}`
           : `/commissions/${row.id}/${action}`
-      const { data: res } = await client.post(endpoint)
+      const { data: res } = await client.post<PayResponse>(endpoint)
       if (action === 'pay') {
         const paymentText = res.paymentNo ? `（${res.paymentNo}）` : ''
         message.success(`已确认支付${paymentText}：应付 ${fmtMoney(res.payable)}，往来抵扣 ${fmtMoney(res.offset)}，实付现金 ${fmtMoney(res.cashOut)}`)
@@ -88,8 +213,7 @@ export default function Commissions() {
       }
       load()
     } catch (e: unknown) {
-      const error = e as { response?: { data?: { message?: string } } }
-      message.error(error.response?.data?.message || '操作失败')
+      message.error(apiErrorMessage(e, '操作失败'))
     }
   }
 
@@ -99,8 +223,8 @@ export default function Commissions() {
       message.success('已删除')
       load()
       loadCash()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
@@ -141,7 +265,7 @@ export default function Commissions() {
           placeholder="状态筛选"
           style={{ width: 160 }}
           value={status}
-          onChange={setStatus}
+          onChange={changeStatus}
           options={Object.entries(COMMISSION_STATUS_LABEL).map(([k, v]) => ({ value: k, label: v }))}
         />
       </Space>
@@ -173,14 +297,14 @@ export default function Commissions() {
             width: COL.channel,
             filters: settlementChannelFilters,
             filterSearch: true,
-            onFilter: (value: any, r) => filterValue(r.channelNameSnapshot) === value,
+            onFilter: (value, r) => filterValue(r.channelNameSnapshot) === value,
           },
           {
             title: '资金模式',
             dataIndex: 'fundSettlementMode',
             width: COL.mode,
             filters: settlementFundModeFilters,
-            onFilter: (value: any, r) => filterValue(r.fundSettlementMode) === value,
+            onFilter: (value, r) => filterValue(r.fundSettlementMode) === value,
             render: (m) => FUND_MODE_LABEL[m],
           },
           {
@@ -188,7 +312,7 @@ export default function Commissions() {
             dataIndex: 'currency',
             width: COL.currency,
             filters: settlementCurrencyFilters,
-            onFilter: (value: any, r) => filterValue(r.currency) === value,
+            onFilter: (value, r) => filterValue(r.currency) === value,
             render: (c: string) => CURRENCY_LABEL[c] || c,
           },
           { title: '应付', dataIndex: 'payableAmount', width: COL.money, render: fmtMoney, align: 'right' },
@@ -210,7 +334,7 @@ export default function Commissions() {
               if (isSelfDeducted(r)) return <Tag color="default">已自扣(报表)</Tag>
 
               if (r.isPaymentInstallment) {
-                const parentIsFinal = FINAL_STATUS.includes(r.parentStatus)
+                const parentIsFinal = FINAL_STATUS.includes(r.parentStatus ?? '')
                 const showParentActions = r.installmentIndex === 0 && !parentIsFinal
                 return (
                   <Space wrap>
@@ -282,14 +406,14 @@ export default function Commissions() {
           width: COL.channel,
           filters: cashChannelFilters,
           filterSearch: true,
-          onFilter: (value: any, r) => filterValue(r.channelName) === value,
+          onFilter: (value, r) => filterValue(r.channelName) === value,
         },
         {
           title: '返佣状态',
           dataIndex: 'rebateStatus',
           width: COL.status,
           filters: cashRebateStatusFilters,
-          onFilter: (value: any, r) => filterValue(r.rebateStatus) === value,
+          onFilter: (value, r) => filterValue(r.rebateStatus) === value,
           render: (s: string) => <Tag color={REBATE_STATUS_COLOR[s]}>{s}</Tag>,
         },
         {
@@ -297,7 +421,7 @@ export default function Commissions() {
           dataIndex: 'fundSettlementMode',
           width: COL.mode,
           filters: cashFundModeFilters,
-          onFilter: (value: any, r) => filterValue(r.fundSettlementMode) === value,
+          onFilter: (value, r) => filterValue(r.fundSettlementMode) === value,
           render: (m: string) => FUND_MODE_LABEL[m],
         },
         {
@@ -305,7 +429,7 @@ export default function Commissions() {
           dataIndex: 'currency',
           width: COL.currency,
           filters: cashCurrencyFilters,
-          onFilter: (value: any, r) => filterValue(r.currency) === value,
+          onFilter: (value, r) => filterValue(r.currency) === value,
           render: (c: string) => CURRENCY_LABEL[c] || c,
         },
         { title: '合同金额', dataIndex: 'contractAmount', width: COL.money, render: fmtMoney, align: 'right' },

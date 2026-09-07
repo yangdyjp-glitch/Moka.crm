@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Button,
@@ -10,20 +10,81 @@ import {
   Space,
   Table,
   Tag,
+  Tooltip,
   message,
 } from 'antd'
 import dayjs from 'dayjs'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps } from '../components/tableLayout'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { useAuth } from '../auth/AuthContext'
 import { CURRENCY_LABEL, PAYMENT_CONFIRM_LABEL, fmtDate, fmtMoney } from '../api/types'
 import { moneyIn } from '../api/money'
 
-type Any = Record<string, any>
+type MoneyValue = number | string
+type PaymentConfirmStatus = 'PENDING' | 'CONFIRMED' | 'PROBLEM'
+
+interface ChannelSummary {
+  name?: string | null
+}
+
+interface CustomerSummary {
+  id: number
+  name: string
+  channelNameSnapshot?: string | null
+  channel?: ChannelSummary | null
+  acquisitionChannel?: ChannelSummary | null
+}
+
+interface OrderSummary {
+  id: number
+  orderNo: string
+  receivableAmount: MoneyValue
+  paidAmount: MoneyValue
+  unpaidAmount: MoneyValue
+  status?: string
+  customer?: { name?: string | null } | null
+}
+
+interface PaymentRow {
+  id: number
+  paymentNo: string
+  createdAt: string
+  confirmedAt?: string | null
+  confirmStatus: PaymentConfirmStatus
+  customer?: CustomerSummary | null
+  order?: OrderSummary | null
+  amount: MoneyValue
+  currency: string
+  method?: string | null
+  remark?: string | null
+}
+
+interface OrderListResponse {
+  items: OrderSummary[]
+  total: number
+}
+
+interface CreatePaymentFormValues {
+  orderId: number
+  amount: number
+}
+
+interface EditPaymentFormValues {
+  amount: number
+  method?: string
+  remark?: string
+}
+
 const EMPTY_FILTER = '__EMPTY__'
 
-function paymentChannelName(r: Any) {
+async function requestPayments(signal?: AbortSignal) {
+  const { data } = await client.get<PaymentRow[]>('/payments', { signal })
+  return data
+}
+
+function paymentChannelName(r: PaymentRow) {
   return r.customer?.channelNameSnapshot || r.customer?.channel?.name || r.customer?.acquisitionChannel?.name || '—'
 }
 
@@ -35,7 +96,7 @@ function filterText(v: unknown) {
   return v == null || v === '' ? '—' : String(v)
 }
 
-function uniqueFilters(rows: Any[], getValue: (row: Any) => unknown, getText: (row: Any) => unknown = getValue) {
+function uniqueFilters<T>(rows: T[], getValue: (row: T) => unknown, getText: (row: T) => unknown = getValue) {
   const seen = new Map<string, string>()
   rows.forEach((row) => {
     const value = filterValue(getValue(row))
@@ -46,11 +107,11 @@ function uniqueFilters(rows: Any[], getValue: (row: Any) => unknown, getText: (r
     .map(([value, text]) => ({ value, text }))
 }
 
-function arrivalMonthValue(r: Any) {
+function arrivalMonthValue(r: PaymentRow) {
   return r.confirmStatus === 'CONFIRMED' && r.confirmedAt ? dayjs(r.confirmedAt).format('YYYY-MM') : EMPTY_FILTER
 }
 
-function monthFilters(rows: Any[], getValue: (row: Any) => string) {
+function monthFilters<T>(rows: T[], getValue: (row: T) => string) {
   const values = Array.from(new Set(rows.map(getValue)))
   return values
     .sort((a, b) => {
@@ -65,25 +126,55 @@ export default function Payments() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'ADMIN'
   const nav = useNavigate()
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const [rows, setRows] = useState<PaymentRow[]>([])
+  const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [form] = Form.useForm()
-  const [orders, setOrders] = useState<Any[]>([])
-  const [editTarget, setEditTarget] = useState<Any | null>(null)
-  const [editForm] = Form.useForm()
+  const [form] = Form.useForm<CreatePaymentFormValues>()
+  const [orders, setOrders] = useState<OrderSummary[]>([])
+  const [editTarget, setEditTarget] = useState<PaymentRow | null>(null)
+  const [editForm] = Form.useForm<EditPaymentFormValues>()
+  const requestIdRef = useRef(0)
 
   const load = () => {
+    const requestId = ++requestIdRef.current
     setLoading(true)
-    client.get('/payments').then((r) => setRows(r.data)).finally(() => setLoading(false))
+    void requestPayments()
+      .then((data) => {
+        if (requestId === requestIdRef.current) setRows(data)
+      })
+      .catch((error: unknown) => {
+        if (requestId === requestIdRef.current) {
+          message.error(apiErrorMessage(error, '收款数据加载失败'))
+        }
+      })
+      .finally(() => {
+        if (requestId === requestIdRef.current) setLoading(false)
+      })
   }
-  useEffect(load, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const requestId = ++requestIdRef.current
+    void requestPayments(controller.signal)
+      .then((data) => {
+        if (!controller.signal.aborted && requestId === requestIdRef.current) setRows(data)
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && requestId === requestIdRef.current) {
+          message.error(apiErrorMessage(error, '收款数据加载失败'))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestId === requestIdRef.current) setLoading(false)
+      })
+    return () => controller.abort()
+  }, [])
 
   const openCreate = async () => {
     form.resetFields()
-    const o = await client.get('/orders', { params: { all: 1 } })
-    setOrders(o.data.items.filter((x: Any) => !['REFUNDED', 'CANCELLED'].includes(x.status)))
+    const { data } = await client.get<OrderListResponse>('/orders', { params: { all: 1 } })
+    setOrders(data.items.filter((order) => !['REFUNDED', 'CANCELLED'].includes(order.status ?? '')))
     setOpen(true)
   }
 
@@ -95,8 +186,8 @@ export default function Payments() {
       message.success('已录入收款（待管理员确认）')
       setOpen(false)
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -108,9 +199,13 @@ export default function Payments() {
     load()
   }
 
-  const openEdit = (r: Any) => {
+  const openEdit = (r: PaymentRow) => {
     setEditTarget(r)
-    editForm.setFieldsValue({ amount: Number(r.amount), method: r.method, remark: r.remark })
+    editForm.setFieldsValue({
+      amount: Number(r.amount),
+      method: r.method ?? undefined,
+      remark: r.remark ?? undefined,
+    })
   }
   const submitEdit = async () => {
     const v = await editForm.validateFields()
@@ -120,8 +215,8 @@ export default function Payments() {
       message.success('已修改')
       setEditTarget(null)
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -131,8 +226,8 @@ export default function Payments() {
       await client.delete(`/payments/${id}`)
       message.success('已删除')
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
@@ -170,8 +265,8 @@ export default function Payments() {
             dataIndex: 'confirmedAt',
             width: COL.date,
             filters: arrivalMonthFilters,
-            onFilter: (value: any, r) => arrivalMonthValue(r) === value,
-            render: (t: string, r: Any) => (r.confirmStatus === 'CONFIRMED' ? fmtDate(t) : '—'),
+            onFilter: (value, r) => arrivalMonthValue(r) === value,
+            render: (t: string, r: PaymentRow) => (r.confirmStatus === 'CONFIRMED' ? fmtDate(t) : '—'),
           },
           { title: '客户', width: COL.person, render: (_, r) => <a onClick={() => nav(`/customers/${r.customer?.id}`)}>{r.customer?.name}</a> },
           {
@@ -179,7 +274,7 @@ export default function Payments() {
             width: COL.channel,
             filters: channelFilters,
             filterSearch: true,
-            onFilter: (value: any, r) => filterValue(paymentChannelName(r)) === value,
+            onFilter: (value, r) => filterValue(paymentChannelName(r)) === value,
             render: (_, r) => paymentChannelName(r),
           },
           { title: '金额', dataIndex: 'amount', width: COL.money, render: moneyIn, align: 'right' },
@@ -188,7 +283,7 @@ export default function Payments() {
             dataIndex: 'currency',
             width: COL.currency,
             filters: currencyFilters,
-            onFilter: (value: any, r) => filterValue(r.currency) === value,
+            onFilter: (value, r) => filterValue(r.currency) === value,
             render: (c) => CURRENCY_LABEL[c],
           },
           {
@@ -196,7 +291,7 @@ export default function Payments() {
             dataIndex: 'confirmStatus',
             width: COL.status,
             filters: confirmStatusFilters,
-            onFilter: (value: any, r) => filterValue(r.confirmStatus) === value,
+            onFilter: (value, r) => filterValue(r.confirmStatus) === value,
             render: (s) => <Tag color={s === 'CONFIRMED' ? 'green' : s === 'PROBLEM' ? 'red' : 'orange'}>{PAYMENT_CONFIRM_LABEL[s]}</Tag>,
           },
           {
@@ -205,7 +300,11 @@ export default function Payments() {
             render: (_, r) =>
               r.confirmStatus === 'CONFIRMED' ? (
                 <Space wrap>
-                  <DeleteBtn onConfirm={() => doDelete(r.id)} title="该收款已到账，删除会回退订单的已收金额。确定删除？" />
+                  <Tooltip title="该收款已确认到账，后端为保护订单金额与返佣核算，不允许删除">
+                    <span>
+                      <DeleteBtn disabled onConfirm={() => doDelete(r.id)}>不可删除</DeleteBtn>
+                    </span>
+                  </Tooltip>
                 </Space>
               ) : (
                 <Space wrap>
@@ -236,7 +335,7 @@ export default function Payments() {
         {editTarget && (
           <Form form={editForm} layout="vertical">
             <div style={{ marginBottom: 12, color: '#6b7280', fontSize: 13 }}>
-              订单 {editTarget.order?.orderNo}　应收 {fmtMoney(editTarget.order?.receivableAmount)} / 已收 {fmtMoney(editTarget.order?.paidAmount)} / 未收 {fmtMoney(editTarget.order?.unpaidAmount)}
+              订单 {editTarget.order?.orderNo}；应收 {fmtMoney(editTarget.order?.receivableAmount)} / 已收 {fmtMoney(editTarget.order?.paidAmount)} / 未收 {fmtMoney(editTarget.order?.unpaidAmount)}
             </div>
             <Form.Item name="amount" label="收款金额" rules={[{ required: true }]}>
               <InputNumber min={0} controls={false} style={{ width: '100%' }} />

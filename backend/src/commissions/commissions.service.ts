@@ -696,96 +696,138 @@ export class CommissionsService {
     paymentId: number,
     voucherAttachmentId?: number,
   ) {
-    const c = await this.prisma.commission.findFirst({
-      where: { id, deletedAt: null },
-      include: {
-        order: {
-          include: {
-            payments: {
-              where: { deletedAt: null },
-              orderBy: { id: 'asc' },
+    return this.serializableTransaction(async (tx) => {
+      const c = await tx.commission.findFirst({
+        where: { id, deletedAt: null },
+        include: {
+          order: {
+            include: {
+              payments: {
+                where: { deletedAt: null },
+                orderBy: { id: 'asc' },
+              },
             },
           },
         },
-      },
-    });
-    if (!c) throw new NotFoundException('分成记录不存在');
-    if (
-      c.settlementCondition !== SettlementCondition.ON_EACH_PAYMENT ||
-      c.fundSettlementMode !== FundSettlementMode.COMPANY_REBATE ||
-      c.commissionMethodSnapshot !== CommissionMethod.NET_RECEIVED_RATIO
-    ) {
-      throw new BadRequestException('该分成不是按每笔到账结算');
-    }
-    if (c.suspended) throw new BadRequestException('分成已挂起，无法支付');
-    const state = this.eachPaymentState(c);
-    const installmentIndex = state.installments.findIndex(
-      (installment) => installment.paymentId === paymentId,
-    );
-    if (installmentIndex < 0) {
-      throw new BadRequestException('收款记录不属于该分成');
-    }
-    const installment = state.installments[installmentIndex];
-    if (installment.payment.confirmStatus !== PaymentConfirmStatus.CONFIRMED) {
-      throw new BadRequestException('对应收款尚未确认到账，不能支付返佣');
-    }
-    if (installment.unpaidAmount <= 0) {
-      throw new BadRequestException('该笔收款的返佣已经支付');
-    }
-    const earlierDue = state.installments
-      .slice(0, installmentIndex)
-      .find(
-        (item) =>
-          item.payment.confirmStatus === PaymentConfirmStatus.CONFIRMED &&
-          item.unpaidAmount > 0,
-      );
-    if (earlierDue) {
-      throw new BadRequestException(
-        `请先支付较早到账的返佣（${earlierDue.payment.paymentNo}）`,
-      );
-    }
-
-    const payable = installment.unpaidAmount;
-    const balance = await this.ledger.getBalance(c.channelId, c.currency);
-    const offset = balance > 0 ? Math.min(payable, balance) : 0;
-    const cashOut = roundMoney(payable - offset);
-    if (offset > 0) {
-      await this.ledger.addEntry({
-        channelId: c.channelId,
-        currency: c.currency,
-        entryType: LedgerEntryType.NEW_ORDER_OFFSET,
-        amount: -offset,
-        relatedCommissionId: c.id,
-        note: `${installment.payment.paymentNo} 返佣抵扣往来挂账 ${offset}`,
-        operatorId: user.id,
       });
-    }
-    const paymentNote = `${installment.payment.paymentNo}返佣：应付${payable}，往来抵扣${offset}，实付现金${cashOut}`;
-    await this.prisma.commission.update({
-      where: { id: c.id },
-      data: {
-        paidAmount: roundMoney(Number(c.paidAmount) + payable),
-        paidById: user.id,
-        paymentVoucherAttachmentId: voucherAttachmentId,
-        remark: c.remark ? `${c.remark}\n${paymentNote}` : paymentNote,
-      },
+      if (!c) throw new NotFoundException('分成记录不存在');
+      if (
+        c.settlementCondition !== SettlementCondition.ON_EACH_PAYMENT ||
+        c.fundSettlementMode !== FundSettlementMode.COMPANY_REBATE ||
+        c.commissionMethodSnapshot !== CommissionMethod.NET_RECEIVED_RATIO
+      ) {
+        throw new BadRequestException('该分成不是按每笔到账结算');
+      }
+      if (c.suspended) throw new BadRequestException('分成已挂起，无法支付');
+
+      const state = this.eachPaymentState(c);
+      const installmentIndex = state.installments.findIndex(
+        (installment) => installment.paymentId === paymentId,
+      );
+      if (installmentIndex < 0) {
+        throw new BadRequestException('收款记录不属于该分成');
+      }
+      const installment = state.installments[installmentIndex];
+      if (installment.payment.confirmStatus !== PaymentConfirmStatus.CONFIRMED) {
+        throw new BadRequestException('对应收款尚未确认到账，不能支付返佣');
+      }
+      if (installment.unpaidAmount <= 0) {
+        throw new BadRequestException('该笔收款的返佣已经支付');
+      }
+      const earlierUnpaid = state.installments
+        .slice(0, installmentIndex)
+        .find((item) => item.unpaidAmount > 0);
+      if (earlierUnpaid) {
+        throw new BadRequestException(
+          `请先处理较早的返佣分笔（${earlierUnpaid.payment.paymentNo}）`,
+        );
+      }
+
+      const payable = installment.unpaidAmount;
+      const balance = await this.ledger.getBalance(
+        c.channelId,
+        c.currency,
+        tx,
+      );
+      const offset = balance > 0 ? Math.min(payable, balance) : 0;
+      const cashOut = roundMoney(payable - offset);
+      const nextPaidAmount = roundMoney(Number(c.paidAmount) + payable);
+      const nextState = this.eachPaymentState({
+        ...c,
+        paidAmount: nextPaidAmount,
+      });
+      const calcBaseAmount = roundMoney(
+        c.order.payments.reduce(
+          (sum, payment) => sum + Number(payment.amount),
+          0,
+        ),
+      );
+      const settledAt = new Date();
+      const paymentNote = `${installment.payment.paymentNo}返佣：应付${payable}，往来抵扣${offset}，实付现金${cashOut}`;
+      const claimed = await tx.commission.updateMany({
+        where: {
+          id: c.id,
+          updatedAt: c.updatedAt,
+          paidAmount: c.paidAmount,
+          suspended: false,
+          settlementCondition: SettlementCondition.ON_EACH_PAYMENT,
+        },
+        data: {
+          paidAmount: { increment: payable },
+          paidById: user.id,
+          paymentVoucherAttachmentId: voucherAttachmentId,
+          remark: c.remark ? `${c.remark}\n${paymentNote}` : paymentNote,
+          calcBaseType: '每笔实收',
+          calcBaseAmount,
+          payableAmount: nextState.totalPayable,
+          unpaidAmount: nextState.unpaidAmount,
+          status: nextState.status,
+          expectedSettlementAt:
+            nextState.dueInstallment?.payment.confirmedAt ??
+            (nextState.dueInstallment ? settledAt : null),
+          actualSettlementAt:
+            nextState.status === CommissionStatus.PAID
+              ? (c.actualSettlementAt ?? settledAt)
+              : null,
+        },
+      });
+      if (claimed.count !== 1) {
+        throw new BadRequestException('返佣记录刚刚发生变化，请刷新后重试');
+      }
+
+      if (offset > 0) {
+        await this.ledger.addEntry(
+          {
+            channelId: c.channelId,
+            currency: c.currency,
+            entryType: LedgerEntryType.NEW_ORDER_OFFSET,
+            amount: -offset,
+            relatedCommissionId: c.id,
+            note: `${installment.payment.paymentNo} 返佣抵扣往来挂账 ${offset}`,
+            operatorId: user.id,
+          },
+          tx,
+        );
+      }
+      await this.audit.log(
+        {
+          operatorId: user.id,
+          relatedType: 'Commission',
+          relatedId: id,
+          action: 'PAY_COMMISSION_INSTALLMENT',
+          newValue: `收款=${installment.payment.paymentNo} 应付=${payable} 往来抵扣=${offset} 实付现金=${cashOut}`,
+        },
+        tx,
+      );
+      return {
+        id,
+        paymentId,
+        paymentNo: installment.payment.paymentNo,
+        payable,
+        offset,
+        cashOut,
+      };
     });
-    await this.syncEachPaymentCommissionById(c.id);
-    await this.audit.log({
-      operatorId: user.id,
-      relatedType: 'Commission',
-      relatedId: id,
-      action: 'PAY_COMMISSION_INSTALLMENT',
-      newValue: `收款=${installment.payment.paymentNo} 应付=${payable} 往来抵扣=${offset} 实付现金=${cashOut}`,
-    });
-    return {
-      id,
-      paymentId,
-      paymentNo: installment.payment.paymentNo,
-      payable,
-      offset,
-      cashOut,
-    };
   }
 
   /** 将采用旧渠道规则的既有返佣安全迁移为“每笔到账后”。 */
@@ -849,8 +891,16 @@ export class CommissionsService {
         throw new BadRequestException('分成已挂起，请先解除挂起');
       }
 
-      const state = this.eachPaymentState(c);
       const paidAmount = roundMoney(Number(c.paidAmount));
+      if (
+        c.settlementCondition === SettlementCondition.ON_SIGN &&
+        paidAmount > 0
+      ) {
+        throw new BadRequestException(
+          '“签约后”的既有返佣已有支付金额，无法自动分配到具体收款，请人工核对',
+        );
+      }
+      const state = this.eachPaymentState(c);
       if (paidAmount > state.totalPayable) {
         throw new BadRequestException('已付返佣超过分笔重算金额，请人工核对');
       }
@@ -891,8 +941,13 @@ export class CommissionsService {
       if (c.settlementCondition === SettlementCondition.ON_EACH_PAYMENT) {
         return { migrated: false, dryRun: false, ...result };
       }
-      if (c.settlementCondition !== SettlementCondition.ON_FULL_PAYMENT) {
-        throw new BadRequestException('仅“缴清后”的既有返佣可执行此迁移');
+      if (
+        c.settlementCondition !== SettlementCondition.ON_SIGN &&
+        c.settlementCondition !== SettlementCondition.ON_FULL_PAYMENT
+      ) {
+        throw new BadRequestException(
+          '仅“签约后”或“缴清后”的既有返佣可执行此迁移',
+        );
       }
       if (
         c.channel.settlementCondition !== SettlementCondition.ON_EACH_PAYMENT
@@ -932,7 +987,7 @@ export class CommissionsService {
         where: {
           id: c.id,
           updatedAt: c.updatedAt,
-          settlementCondition: SettlementCondition.ON_FULL_PAYMENT,
+          settlementCondition: c.settlementCondition,
         },
         data: {
           settlementCondition: SettlementCondition.ON_EACH_PAYMENT,

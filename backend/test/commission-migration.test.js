@@ -78,10 +78,12 @@ function commissionRecord(overrides = {}) {
 function setup(record) {
   let updated = null;
   let audited = null;
+  let claimedWhere = null;
   const tx = {
     commission: {
       findFirst: async () => record,
-      updateMany: async ({ data }) => {
+      updateMany: async ({ where, data }) => {
+        claimedWhere = where;
         updated = data;
         return { count: 1 };
       },
@@ -101,11 +103,12 @@ function setup(record) {
   return {
     service,
     changes: () => ({ updated, audited }),
+    claimWhere: () => claimedWhere,
   };
 }
 
 test('migrates an old full-payment commission into per-payment rows', async () => {
-  const { service, changes } = setup(commissionRecord());
+  const { service, changes, claimWhere } = setup(commissionRecord());
   const request = {
     expectedCustomerNo: 'KH000130',
     expectedOrderNo: 'DD000130',
@@ -158,6 +161,124 @@ test('migrates an old full-payment commission into per-payment rows', async () =
   assert.equal(Object.hasOwn(updated, 'paidAmount'), false);
   assert.equal(audited.operatorId, 1);
   assert.equal(audited.action, 'MIGRATE_COMMISSION_TO_EACH_PAYMENT');
+  assert.equal(
+    claimWhere().settlementCondition,
+    SettlementCondition.ON_FULL_PAYMENT,
+  );
+});
+
+test('migrates an old on-sign commission into confirmed and pending payment rows', async () => {
+  const firstConfirmedAt = new Date('2026-09-01T05:00:00.000Z');
+  const record = commissionRecord({
+    id: 20,
+    commissionNo: 'FC000088',
+    customerId: 112,
+    orderId: 41,
+    channelId: 10,
+    calcBaseAmount: 12000,
+    payableAmount: 1800,
+    unpaidAmount: 1800,
+    status: CommissionStatus.PENDING_REVIEW,
+    settlementCondition: SettlementCondition.ON_SIGN,
+    customer: {
+      id: 112,
+      customerNo: 'KH000088',
+      name: '张子彦',
+    },
+    order: {
+      id: 41,
+      orderNo: 'DD000088',
+      payments: [
+        {
+          id: 55,
+          paymentNo: 'SK000088',
+          amount: 12000,
+          confirmStatus: PaymentConfirmStatus.CONFIRMED,
+          confirmedAt: firstConfirmedAt,
+          updatedAt: new Date('2026-09-01T05:00:00.000Z'),
+          remark: '首款',
+          paidAt: new Date('2026-09-01T00:00:00.000Z'),
+        },
+        {
+          id: 56,
+          paymentNo: 'SK000088-02',
+          amount: 12000,
+          confirmStatus: PaymentConfirmStatus.PENDING,
+          confirmedAt: null,
+          updatedAt: new Date('2026-09-01T05:01:00.000Z'),
+          remark: '尾款',
+          paidAt: new Date('2026-09-01T00:01:00.000Z'),
+        },
+      ],
+    },
+  });
+  const { service, changes, claimWhere } = setup(record);
+  const request = {
+    expectedCustomerNo: 'KH000088',
+    expectedOrderNo: 'DD000088',
+    reason: '将签约后快照迁移为每笔到账后',
+  };
+
+  const preview = await service.migrateToEachPayment(
+    { id: 1 },
+    20,
+    { ...request, confirm: false },
+  );
+  const result = await service.migrateToEachPayment(
+    { id: 1 },
+    20,
+    {
+      ...request,
+      confirm: true,
+      previewFingerprint: preview.previewFingerprint,
+    },
+  );
+  const { updated, audited } = changes();
+
+  assert.equal(preview.dryRun, true);
+  assert.equal(result.migrated, true);
+  assert.equal(result.commissionNo, 'FC000088');
+  assert.equal(result.customerNo, 'KH000088');
+  assert.equal(result.orderNo, 'DD000088');
+  assert.equal(result.payableAmount, 3600);
+  assert.equal(result.paidAmount, 0);
+  assert.equal(result.unpaidAmount, 3600);
+  assert.equal(result.status, CommissionStatus.PENDING_REVIEW);
+  assert.deepEqual(
+    result.installments.map((item) => ({
+      paymentNo: item.paymentNo,
+      payableAmount: item.payableAmount,
+      paidAmount: item.paidAmount,
+      unpaidAmount: item.unpaidAmount,
+      status: item.status,
+    })),
+    [
+      {
+        paymentNo: 'SK000088',
+        payableAmount: 1800,
+        paidAmount: 0,
+        unpaidAmount: 1800,
+        status: CommissionStatus.PENDING_REVIEW,
+      },
+      {
+        paymentNo: 'SK000088-02',
+        payableAmount: 1800,
+        paidAmount: 0,
+        unpaidAmount: 1800,
+        status: CommissionStatus.NOT_DUE,
+      },
+    ],
+  );
+  assert.equal(updated.settlementCondition, SettlementCondition.ON_EACH_PAYMENT);
+  assert.equal(updated.expectedSettlementAt, firstConfirmedAt);
+  assert.equal(claimWhere().id, 20);
+  assert.equal(claimWhere().updatedAt, record.updatedAt);
+  assert.equal(claimWhere().settlementCondition, SettlementCondition.ON_SIGN);
+  assert.match(audited.oldValue, /"settlementCondition":"ON_SIGN"/);
+  assert.match(
+    audited.newValue,
+    /"settlementCondition":"ON_EACH_PAYMENT"/,
+  );
 });
 
 test('keeps the operation idempotent without duplicating the audit log', async () => {
@@ -253,6 +374,30 @@ test('rejects migration when historical paid commission exceeds the recalculatio
       },
     ),
     /已付返佣超过分笔重算金额/,
+  );
+  assert.deepEqual(changes(), { updated: null, audited: null });
+});
+
+test('rejects an on-sign migration with historical paid commission', async () => {
+  const record = commissionRecord({
+    settlementCondition: SettlementCondition.ON_SIGN,
+    paidAmount: 1,
+    unpaidAmount: 1649,
+  });
+  const { service, changes } = setup(record);
+
+  await assert.rejects(
+    service.migrateToEachPayment(
+      { id: 1 },
+      21,
+      {
+        expectedCustomerNo: 'KH000130',
+        expectedOrderNo: 'DD000130',
+        reason: '尝试迁移已付签约后返佣',
+        confirm: false,
+      },
+    ),
+    /已有支付金额.*请人工核对/,
   );
   assert.deepEqual(changes(), { updated: null, audited: null });
 });

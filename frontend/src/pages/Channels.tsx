@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { AxiosRequestConfig } from 'axios'
 import {
   Alert,
   Button,
@@ -14,6 +15,7 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps, smallTableProps } from '../components/tableLayout'
 import { useAuth } from '../auth/AuthContext'
@@ -26,48 +28,180 @@ import {
   SETTLEMENT_COND_LABEL,
 } from '../api/types'
 
-type Any = Record<string, any>
+type MoneyValue = number | string
+
+interface ChannelRow {
+  id: number
+  name: string
+  channelType: string
+  commissionMethod: string
+  defaultCommissionAmount?: MoneyValue | null
+  defaultCommissionRate?: MoneyValue | null
+  fundSettlementMode: string
+  settlementCondition: string
+  contactName?: string | null
+  contactInfo?: string | null
+}
+
+interface ChannelFormValues {
+  name: string
+  channelType: string
+  commissionMethod?: string
+  defaultCommissionAmount?: number
+  defaultCommissionRate?: number
+  fundSettlementMode?: string
+  settlementCondition?: string
+  contactName?: string
+  contactInfo?: string
+}
+
+interface AcquisitionChannelRow {
+  id: number
+  name: string
+  active: boolean
+}
+
+interface AcquisitionChannelFormValues {
+  name: string
+}
+
+interface LedgerEntry {
+  id: number
+  createdAt: string
+  currency: string
+  entryType: string
+  amount: MoneyValue
+  balanceAfter: MoneyValue
+  note?: string | null
+}
+
+interface LedgerData {
+  balances: { CNY: MoneyValue; JPY: MoneyValue }
+  entries: LedgerEntry[]
+}
+
+type NoCacheRequestConfig = AxiosRequestConfig & { noCache: true }
+
+function noCacheConfig(signal?: AbortSignal): NoCacheRequestConfig {
+  return { noCache: true, signal }
+}
+
+async function requestChannels(signal?: AbortSignal) {
+  const { data } = await client.get<ChannelRow[]>('/channels', noCacheConfig(signal))
+  return data
+}
+
+async function requestAcquisitionChannels(signal?: AbortSignal) {
+  const { data } = await client.get<AcquisitionChannelRow[]>(
+    '/acquisition-channels/all',
+    noCacheConfig(signal),
+  )
+  return data
+}
 
 export default function Channels() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'ADMIN'
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const [rows, setRows] = useState<ChannelRow[]>([])
+  const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [editing, setEditing] = useState<Any | null>(null)
-  const [form] = Form.useForm()
-  const [ledger, setLedger] = useState<Any | null>(null)
-  const [acqRows, setAcqRows] = useState<Any[]>([])
+  const [editing, setEditing] = useState<ChannelRow | null>(null)
+  const [form] = Form.useForm<ChannelFormValues>()
+  const [ledger, setLedger] = useState<LedgerData | null>(null)
+  const [acqRows, setAcqRows] = useState<AcquisitionChannelRow[]>([])
   const [acqOpen, setAcqOpen] = useState(false)
-  const [acqEditing, setAcqEditing] = useState<Any | null>(null)
-  const [acqForm] = Form.useForm()
+  const [acqEditing, setAcqEditing] = useState<AcquisitionChannelRow | null>(null)
+  const [acqForm] = Form.useForm<AcquisitionChannelFormValues>()
+  const channelRequestId = useRef(0)
+  const acquisitionRequestId = useRef(0)
   const commissionMethod = Form.useWatch('commissionMethod', form)
   const sortedRows = useMemo(() => sortByChannelNameKeyword(rows), [rows])
   const openLedger = async (id: number) => {
-    const { data } = await client.get(`/channels/${id}/ledger`)
+    const { data } = await client.get<LedgerData>(`/channels/${id}/ledger`)
     setLedger(data)
   }
 
   const load = () => {
+    const requestId = ++channelRequestId.current
     setLoading(true)
     setLoadError('')
-    client.get('/channels', { noCache: true } as any)
-      .then((r) => setRows(r.data))
-      .catch((e) => setLoadError(e.response?.data?.message || '渠道数据加载失败，请检查后端或数据库连接'))
-      .finally(() => setLoading(false))
+    void requestChannels()
+      .then((data) => {
+        if (requestId !== channelRequestId.current) return
+        setRows(data)
+        setLoadError('')
+      })
+      .catch((error: unknown) => {
+        if (requestId === channelRequestId.current) {
+          setLoadError(apiErrorMessage(error, '渠道数据加载失败，请检查后端或数据库连接'))
+        }
+      })
+      .finally(() => {
+        if (requestId === channelRequestId.current) setLoading(false)
+      })
   }
-  const loadAcq = () => {
-    client.get('/acquisition-channels/all', { noCache: true } as any).then((r) => setAcqRows(r.data))
-  }
-  useEffect(() => { load(); loadAcq() }, [])
 
-  const openForm = (rec?: Any) => {
+  const loadAcq = () => {
+    const requestId = ++acquisitionRequestId.current
+    void requestAcquisitionChannels()
+      .then((data) => {
+        if (requestId === acquisitionRequestId.current) setAcqRows(data)
+      })
+      .catch((error: unknown) => {
+        if (requestId === acquisitionRequestId.current) {
+          message.error(apiErrorMessage(error, '获取渠道数据加载失败'))
+        }
+      })
+  }
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const channelRequest = ++channelRequestId.current
+    const acquisitionRequest = ++acquisitionRequestId.current
+    void requestChannels(controller.signal)
+      .then((data) => {
+        if (!controller.signal.aborted && channelRequest === channelRequestId.current) {
+          setRows(data)
+          setLoadError('')
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && channelRequest === channelRequestId.current) {
+          setLoadError(apiErrorMessage(error, '渠道数据加载失败，请检查后端或数据库连接'))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && channelRequest === channelRequestId.current) {
+          setLoading(false)
+        }
+      })
+    void requestAcquisitionChannels(controller.signal)
+      .then((data) => {
+        if (!controller.signal.aborted && acquisitionRequest === acquisitionRequestId.current) {
+          setAcqRows(data)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && acquisitionRequest === acquisitionRequestId.current) {
+          message.error(apiErrorMessage(error, '获取渠道数据加载失败'))
+        }
+      })
+    return () => controller.abort()
+  }, [])
+
+  const openForm = (rec?: ChannelRow) => {
     setEditing(rec || null)
     form.resetFields()
     if (rec) form.setFieldsValue({
-      ...rec,
+      name: rec.name,
+      channelType: rec.channelType,
+      commissionMethod: rec.commissionMethod,
+      fundSettlementMode: rec.fundSettlementMode,
+      settlementCondition: rec.settlementCondition,
+      contactName: rec.contactName ?? undefined,
+      contactInfo: rec.contactInfo ?? undefined,
       defaultCommissionRate: rec.defaultCommissionRate != null ? Number(rec.defaultCommissionRate) : undefined,
       defaultCommissionAmount: rec.defaultCommissionAmount != null ? Number(rec.defaultCommissionAmount) : undefined,
     })
@@ -84,14 +218,14 @@ export default function Channels() {
       message.success('已保存')
       setOpen(false)
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
   }
 
-  const openAcq = (rec?: Any) => {
+  const openAcq = (rec?: AcquisitionChannelRow) => {
     setAcqEditing(rec || null)
     acqForm.resetFields()
     if (rec) acqForm.setFieldsValue({ name: rec.name })
@@ -105,11 +239,11 @@ export default function Channels() {
       message.success('已保存')
       setAcqOpen(false)
       loadAcq()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败（名称可能重复）')
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败（名称可能重复）'))
     }
   }
-  const toggleAcq = async (rec: Any) => {
+  const toggleAcq = async (rec: AcquisitionChannelRow) => {
     await client.patch(`/acquisition-channels/${rec.id}`, { active: !rec.active })
     loadAcq()
   }
@@ -118,8 +252,8 @@ export default function Channels() {
       await client.delete(`/acquisition-channels/${id}`)
       message.success('已删除')
       loadAcq()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
   const doRemove = async (id: number) => {
@@ -127,8 +261,8 @@ export default function Channels() {
       await client.delete(`/channels/${id}`)
       message.success('已删除')
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
@@ -256,7 +390,7 @@ export default function Channels() {
             {
               title: '操作',
               width: COL.actionWide,
-              render: (_: any, r: Any) => (
+              render: (_: unknown, r: AcquisitionChannelRow) => (
                 <Space wrap>
                   <ActionBtn tone="edit" onClick={() => openAcq(r)}>重命名</ActionBtn>
                   {r.active ? (

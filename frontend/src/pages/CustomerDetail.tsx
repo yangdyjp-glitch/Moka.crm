@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
+  Alert,
   Button,
   Card,
   Descriptions,
@@ -12,12 +13,14 @@ import {
   Table,
   Tabs,
   Tag,
+  Spin,
   Upload,
   message,
 } from 'antd'
 import { UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import client, { downloadFile } from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { useAuth } from '../auth/AuthContext'
 import {
   CUSTOMER_STATUS_LABEL,
@@ -34,60 +37,259 @@ import { moneyIn } from '../api/money'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, smallTableProps } from '../components/tableLayout'
 
-type Any = Record<string, any>
+type MoneyValue = string | number
+
+interface NamedReference {
+  name: string
+}
+
+interface FollowUp {
+  id: number
+  followedAt: string
+  method: string
+  content: string
+  result: string | null
+  nextFollowUpAt: string | null
+}
+
+interface CustomerOrder {
+  id: number
+  orderNo: string
+  signedAt: string
+  currency: string
+  receivableAmount: MoneyValue
+  paidAmount: MoneyValue
+  unpaidAmount: MoneyValue
+  status: string
+}
+
+interface Referral {
+  id: number
+  serviceType: string
+  downstreamCompany: string
+  commissionAmount: MoneyValue
+  currency: string
+  collectionStatus: string
+}
+
+interface Attachment {
+  id: number
+  fileName: string
+  fileType: string
+  createdAt: string
+}
+
+interface CustomerDetails {
+  name: string
+  customerNo: string
+  mainStatus: string
+  intentionLevel: string | null
+  salesStage: string | null
+  hasProblem: boolean
+  discoveredAt: string | null
+  createdAt: string
+  phone: string | null
+  wechat: string | null
+  email: string | null
+  sourceCategory: string
+  channel: NamedReference | null
+  acquisitionChannel: NamedReference | null
+  commissionRateSnapshot: MoneyValue | null
+  nextFollowUpAt: string | null
+  remark: string | null
+  followUps: FollowUp[]
+  orders: CustomerOrder[]
+  referrals: Referral[]
+}
+
+interface FollowFormValues {
+  method: string
+  content: string
+  result?: string
+  nextFollowUpAt?: string
+}
 
 export default function CustomerDetail() {
   const { id } = useParams()
+  const customerId = id ?? ''
   const { user } = useAuth()
-  const [c, setC] = useState<Any | null>(null)
+  const [customers, setCustomers] = useState<Record<string, CustomerDetails>>({})
+  const [loadErrors, setLoadErrors] = useState<Record<string, string>>({})
+  const [attachmentErrors, setAttachmentErrors] = useState<Record<string, string>>({})
+  const [reloadKey, setReloadKey] = useState(0)
   const [followOpen, setFollowOpen] = useState(false)
-  const [aiSummary, setAiSummary] = useState<string | null>(null)
-  const [attachments, setAttachments] = useState<Any[]>([])
-  const [form] = Form.useForm()
+  const [aiSummaries, setAiSummaries] = useState<Record<string, string>>({})
+  const [attachmentsByCustomer, setAttachmentsByCustomer] = useState<Record<string, Attachment[]>>({})
+  const [form] = Form.useForm<FollowFormValues>()
+  const customerRequests = useRef(new Map<string, number>())
+  const attachmentRequests = useRef(new Map<string, number>())
+  const summaryRequests = useRef(new Map<string, number>())
+  const mountedRef = useRef(true)
+  const c = customers[customerId] ?? null
+  const attachments = attachmentsByCustomer[customerId] ?? []
+  const aiSummary = aiSummaries[customerId] ?? null
+  const loadError = loadErrors[customerId]
+  const attachmentError = attachmentErrors[customerId]
   const canFollow = user?.role === 'SALES' || user?.role === 'BUSINESS_SUPERVISOR' || user?.role === 'ADMIN'
   const isAdmin = user?.role === 'ADMIN'
 
-  const load = () => client.get(`/customers/${id}`).then((r) => setC(r.data))
-  const loadAtt = () =>
-    client.get('/attachments', { params: { relatedType: 'Customer', relatedId: id } }).then((r) => setAttachments(r.data))
   useEffect(() => {
-    load()
-    loadAtt()
-  }, [id])
-  if (!c) return null
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  const loadCustomer = useCallback(async (signal?: AbortSignal) => {
+    if (!customerId) return
+    const requestId = (customerRequests.current.get(customerId) ?? 0) + 1
+    customerRequests.current.set(customerId, requestId)
+    const { data } = await client.get<CustomerDetails>(`/customers/${customerId}`, {
+      noCache: true,
+      signal,
+    })
+    if (mountedRef.current && !signal?.aborted && requestId === customerRequests.current.get(customerId)) {
+      setCustomers((current) => ({ ...current, [customerId]: data }))
+      setLoadErrors((current) => {
+        if (!(customerId in current)) return current
+        const next = { ...current }
+        delete next[customerId]
+        return next
+      })
+    }
+  }, [customerId])
+
+  const loadAttachments = useCallback(async (signal?: AbortSignal) => {
+    if (!customerId) return
+    const requestId = (attachmentRequests.current.get(customerId) ?? 0) + 1
+    attachmentRequests.current.set(customerId, requestId)
+    const { data } = await client.get<Attachment[]>('/attachments', {
+      noCache: true,
+      params: { relatedType: 'Customer', relatedId: customerId },
+      signal,
+    })
+    if (mountedRef.current && !signal?.aborted && requestId === attachmentRequests.current.get(customerId)) {
+      setAttachmentsByCustomer((current) => ({ ...current, [customerId]: data }))
+      setAttachmentErrors((current) => {
+        if (!(customerId in current)) return current
+        const next = { ...current }
+        delete next[customerId]
+        return next
+      })
+    }
+  }, [customerId])
+
+  useEffect(() => {
+    if (!customerId) return
+    const controller = new AbortController()
+    void loadCustomer(controller.signal).catch((error: unknown) => {
+      if (mountedRef.current && !controller.signal.aborted) {
+        setLoadErrors((current) => ({
+          ...current,
+          [customerId]: apiErrorMessage(error, '客户详情加载失败'),
+        }))
+      }
+    })
+    void loadAttachments(controller.signal).catch((error: unknown) => {
+      if (mountedRef.current && !controller.signal.aborted) {
+        setAttachmentErrors((current) => ({
+          ...current,
+          [customerId]: apiErrorMessage(error, '附件加载失败'),
+        }))
+      }
+    })
+    return () => controller.abort()
+  }, [customerId, loadAttachments, loadCustomer, reloadKey])
+
+  const retry = () => {
+    setLoadErrors((current) => {
+      if (!(customerId in current)) return current
+      const next = { ...current }
+      delete next[customerId]
+      return next
+    })
+    setAttachmentErrors((current) => {
+      if (!(customerId in current)) return current
+      const next = { ...current }
+      delete next[customerId]
+      return next
+    })
+    setReloadKey((current) => current + 1)
+  }
+
+  if (!customerId) {
+    return <Alert type="error" showIcon message="客户地址无效" description="缺少客户编号，无法加载详情。" />
+  }
+  if (!c && loadError) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message="客户详情加载失败"
+        description={loadError}
+        action={<Button size="small" onClick={retry}>重试</Button>}
+      />
+    )
+  }
+  if (!c) {
+    return (
+      <div style={{ minHeight: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+        <Spin />
+        <span>正在加载客户详情…</span>
+      </div>
+    )
+  }
 
   const addFollow = async () => {
     const v = await form.validateFields()
-    await client.post(`/customers/${id}/follow-ups`, {
+    await client.post(`/customers/${customerId}/follow-ups`, {
       ...v,
       nextFollowUpAt: v.nextFollowUpAt ? dayjs(v.nextFollowUpAt).toISOString() : undefined,
     })
+    if (!mountedRef.current) return
     message.success('已记录跟进')
     setFollowOpen(false)
     form.resetFields()
-    load()
+    await loadCustomer()
   }
   const setStage = async (salesStage: string) => {
-    await client.post(`/customers/${id}/sales-stage`, { salesStage })
+    await client.post(`/customers/${customerId}/sales-stage`, { salesStage })
+    if (!mountedRef.current) return
     message.success('已更新销售阶段')
-    load()
+    await loadCustomer()
   }
   const doAi = async () => {
-    const { data } = await client.get(`/customers/${id}/ai-summary`)
-    setAiSummary(data.summary)
+    const requestId = (summaryRequests.current.get(customerId) ?? 0) + 1
+    summaryRequests.current.set(customerId, requestId)
+    const { data } = await client.get<{ summary: string }>(`/customers/${customerId}/ai-summary`, {
+      noCache: true,
+    })
+    if (mountedRef.current && requestId === summaryRequests.current.get(customerId)) {
+      setAiSummaries((current) => ({ ...current, [customerId]: data.summary }))
+    }
   }
   const delOrder = async (oid: number) => {
     try {
       await client.delete(`/orders/${oid}`)
       message.success('已删除')
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+      await loadCustomer()
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
   return (
     <div>
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message="客户详情刷新失败"
+          description={loadError}
+          action={<Button size="small" onClick={retry}>重试</Button>}
+          style={{ marginBottom: 16 }}
+        />
+      )}
       <Card
         title={
           <Space wrap>
@@ -183,7 +385,7 @@ export default function CustomerDetail() {
                         {
                           title: '操作',
                           width: COL.action,
-                          render: (_: any, r: Any) => <DeleteBtn onConfirm={() => delOrder(r.id)} />,
+                          render: (_: unknown, r: CustomerOrder) => <DeleteBtn onConfirm={() => delOrder(r.id)} />,
                         },
                       ]
                     : []),
@@ -215,16 +417,26 @@ export default function CustomerDetail() {
             label: `附件 (${attachments.length})`,
             children: (
               <>
+                {attachmentError && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="附件加载失败"
+                    description={attachmentError}
+                    action={<Button size="small" onClick={retry}>重试</Button>}
+                    style={{ marginBottom: 12 }}
+                  />
+                )}
                 <Upload
                   showUploadList={false}
                   customRequest={async ({ file }) => {
                     const fd = new FormData()
                     fd.append('file', file as File)
                     fd.append('relatedType', 'Customer')
-                    fd.append('relatedId', String(id))
+                    fd.append('relatedId', customerId)
                     await client.post('/attachments', fd)
                     message.success('已上传')
-                    loadAtt()
+                    await loadAttachments()
                   }}
                 >
                   <Button icon={<UploadOutlined />} style={{ marginBottom: 12 }}>上传合同 / 凭证</Button>
@@ -241,7 +453,7 @@ export default function CustomerDetail() {
                     {
                       title: '操作',
                       width: COL.action,
-                      render: (_: any, r: Any) => (
+                      render: (_: unknown, r: Attachment) => (
                         <ActionBtn tone="view" onClick={() => downloadFile(`/attachments/${r.id}/file`, r.fileName)}>下载</ActionBtn>
                       ),
                     },
@@ -268,7 +480,19 @@ export default function CustomerDetail() {
         </Form>
       </Modal>
 
-      <Modal title="AI 跟进摘要" open={!!aiSummary} onCancel={() => setAiSummary(null)} footer={null}>
+      <Modal
+        title="AI 跟进摘要"
+        open={!!aiSummary}
+        onCancel={() => {
+          summaryRequests.current.set(customerId, (summaryRequests.current.get(customerId) ?? 0) + 1)
+          setAiSummaries((current) => {
+            const next = { ...current }
+            delete next[customerId]
+            return next
+          })
+        }}
+        footer={null}
+      >
         <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: 0 }}>{aiSummary}</pre>
       </Modal>
     </div>

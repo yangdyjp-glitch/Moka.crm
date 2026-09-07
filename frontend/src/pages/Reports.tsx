@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Card, DatePicker, Select, Space, Table, Tabs } from 'antd'
-import dayjs from 'dayjs'
+import { Card, DatePicker, Select, Space, Table, Tabs, message } from 'antd'
+import dayjs, { type Dayjs } from 'dayjs'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import {
   CURRENCY_LABEL,
   FUND_MODE_LABEL,
@@ -9,47 +10,130 @@ import {
 } from '../api/types'
 import { COL, smallTableProps } from '../components/tableLayout'
 
-type Any = Record<string, any>
 type Period = 'all' | 'year' | 'month'
+type MoneyValue = number | string | null
+
+type FinanceMetrics = {
+  currency: string
+  orderCount: number
+  receivableAmount: MoneyValue
+  channelPayable: MoneyValue
+  channelSettled: MoneyValue
+  pendingAgentDeduction: MoneyValue
+  pendingRebate: MoneyValue
+  companyActualReceived: MoneyValue
+  balance: MoneyValue
+}
+
+type FinanceSummaryRow = FinanceMetrics & {
+  confirmedReceived: MoneyValue
+  unpaidAmount: MoneyValue
+  refundAmount: MoneyValue
+}
+
+type FinanceModeRow = FinanceMetrics & { fundSettlementMode: string }
+type FinanceSalesRow = FinanceMetrics & { salesUserId?: number | null; salesName: string }
+type FinanceProductRow = FinanceMetrics & { productId: number; productName: string }
+
+type FinanceReport = {
+  summary: FinanceSummaryRow[]
+  byMode: FinanceModeRow[]
+  bySales: FinanceSalesRow[]
+  byProduct: FinanceProductRow[]
+}
+
+type ChannelReportRow = {
+  channelId: number
+  currency: string
+  channel?: { name: string } | null
+  _count: number
+  _sum?: {
+    payableAmount?: MoneyValue
+    paidAmount?: MoneyValue
+    unpaidAmount?: MoneyValue
+  }
+}
+
+type SalesReportRow = {
+  ownerUserId: number
+  name: string
+  customerCount: number
+  signedCount: number
+}
+
+function reportParams(period: Period, year: Dayjs, month: Dayjs) {
+  if (period === 'year') return { period, year: String(year.year()) }
+  if (period === 'month') return { period, month: month.format('YYYY-MM') }
+  return { period }
+}
 
 export default function Reports() {
-  const [finance, setFinance] = useState<Any | null>(null)
-  const [financeLoading, setFinanceLoading] = useState(false)
+  const [finance, setFinance] = useState<FinanceReport | null>(null)
+  const [financeLoading, setFinanceLoading] = useState(true)
   const [period, setPeriod] = useState<Period>('all')
   const [year, setYear] = useState(dayjs())
   const [month, setMonth] = useState(dayjs())
-  const [channels, setChannels] = useState<Any[]>([])
-  const [sales, setSales] = useState<Any[]>([])
-  const [channelsSalesLoading, setChannelsSalesLoading] = useState(false)
+  const [channels, setChannels] = useState<ChannelReportRow[]>([])
+  const [sales, setSales] = useState<SalesReportRow[]>([])
+  const [channelsSalesLoading, setChannelsSalesLoading] = useState(true)
 
   useEffect(() => {
-    const params =
-      period === 'year'
-        ? { period, year: String(year.year()) }
-        : period === 'month'
-          ? { period, month: month.format('YYYY-MM') }
-          : { period }
-    setChannelsSalesLoading(true)
-    Promise.all([
-      client.get('/reports/channels', { params }),
-      client.get('/reports/sales', { params }),
-    ])
-      .then(([channelsResponse, salesResponse]) => {
+    let active = true
+    const controller = new AbortController()
+    const params = reportParams(period, year, month)
+    void Promise.resolve().then(async () => {
+      if (!active) return
+      setChannelsSalesLoading(true)
+      try {
+        const [channelsResponse, salesResponse] = await Promise.all([
+          client.get<ChannelReportRow[]>('/reports/channels', { params, signal: controller.signal }),
+          client.get<SalesReportRow[]>('/reports/sales', { params, signal: controller.signal }),
+        ])
+        if (!active) return
         setChannels(channelsResponse.data)
         setSales(salesResponse.data)
-      })
-      .finally(() => setChannelsSalesLoading(false))
+      } catch (error: unknown) {
+        if (active) {
+          setChannels([])
+          setSales([])
+          message.error(apiErrorMessage(error, '渠道与销售报表加载失败'))
+        }
+      } finally {
+        if (active) setChannelsSalesLoading(false)
+      }
+    })
+    return () => {
+      active = false
+      controller.abort()
+    }
   }, [period, year, month])
 
   useEffect(() => {
-    const params =
-      period === 'year'
-        ? { period, year: String(year.year()) }
-        : period === 'month'
-          ? { period, month: month.format('YYYY-MM') }
-          : { period }
-    setFinanceLoading(true)
-    client.get('/reports/finance', { params }).then((r) => setFinance(r.data)).finally(() => setFinanceLoading(false))
+    let active = true
+    const controller = new AbortController()
+    const params = reportParams(period, year, month)
+    void Promise.resolve().then(async () => {
+      if (!active) return
+      setFinanceLoading(true)
+      try {
+        const response = await client.get<FinanceReport>('/reports/finance', {
+          params,
+          signal: controller.signal,
+        })
+        if (active) setFinance(response.data)
+      } catch (error: unknown) {
+        if (active) {
+          setFinance(null)
+          message.error(apiErrorMessage(error, '财务报表加载失败'))
+        }
+      } finally {
+        if (active) setFinanceLoading(false)
+      }
+    })
+    return () => {
+      active = false
+      controller.abort()
+    }
   }, [period, year, month])
 
   const periodFilter = (
@@ -83,12 +167,12 @@ export default function Reports() {
             <>
               {periodFilter}
               <Card title="公司现金总览（按币种）" size="small" style={{ marginBottom: 16 }}>
-                <Table
+                <Table<FinanceSummaryRow>
                   {...smallTableProps}
                   className="finance-report-table"
                   scroll={undefined}
                   pagination={false}
-                  rowKey={(r: Any) => r.currency}
+                  rowKey={(r) => r.currency}
                   loading={financeLoading}
                   dataSource={finance?.summary || []}
                   columns={[
@@ -108,12 +192,12 @@ export default function Reports() {
                 />
               </Card>
               <Card title="资金模式拆分（按币种 × 模式）" size="small" style={{ marginBottom: 16 }}>
-                <Table
+                <Table<FinanceModeRow>
                   {...smallTableProps}
                   className="finance-report-table"
                   scroll={undefined}
                   pagination={false}
-                  rowKey={(r: Any) => r.currency + r.fundSettlementMode}
+                  rowKey={(r) => r.currency + r.fundSettlementMode}
                   loading={financeLoading}
                   dataSource={finance?.byMode || []}
                   columns={[
@@ -140,27 +224,27 @@ export default function Reports() {
             <>
               {periodFilter}
               <Card title="渠道统计" size="small" style={{ marginBottom: 16 }}>
-                <Table
+                <Table<ChannelReportRow>
                   {...smallTableProps}
                   pagination={false}
-                  rowKey={(r: Any) => r.channelId + r.currency}
+                  rowKey={(r) => r.channelId + r.currency}
                   loading={channelsSalesLoading}
                   dataSource={channels}
                   columns={[
-                    { title: '渠道', width: COL.channel, render: (_: any, r: Any) => r.channel?.name || r.channelId },
+                    { title: '渠道', width: COL.channel, render: (_, r) => r.channel?.name || r.channelId },
                     { title: '币种', dataIndex: 'currency', width: COL.currency, render: (c: string) => CURRENCY_LABEL[c] },
                     { title: '笔数', dataIndex: '_count', width: COL.count },
-                    { title: '应付分成', width: COL.money, align: 'right', render: (_: any, r: Any) => fmtMoney(r._sum?.payableAmount) },
-                    { title: '已付', width: COL.money, align: 'right', render: (_: any, r: Any) => fmtMoney(r._sum?.paidAmount) },
-                    { title: '未付', width: COL.money, align: 'right', render: (_: any, r: Any) => fmtMoney(r._sum?.unpaidAmount) },
+                    { title: '应付分成', width: COL.money, align: 'right', render: (_, r) => fmtMoney(r._sum?.payableAmount) },
+                    { title: '已付', width: COL.money, align: 'right', render: (_, r) => fmtMoney(r._sum?.paidAmount) },
+                    { title: '未付', width: COL.money, align: 'right', render: (_, r) => fmtMoney(r._sum?.unpaidAmount) },
                   ]}
                 />
               </Card>
               <Card title="销售统计" size="small">
-                <Table
+                <Table<SalesReportRow>
                   {...smallTableProps}
                   pagination={false}
-                  rowKey={(r: Any) => r.ownerUserId}
+                  rowKey={(r) => r.ownerUserId}
                   loading={channelsSalesLoading}
                   dataSource={sales}
                   columns={[
@@ -171,12 +255,12 @@ export default function Reports() {
                 />
               </Card>
               <Card title="销售拆分（按币种 × 销售）" size="small" style={{ marginBottom: 16 }}>
-                <Table
+                <Table<FinanceSalesRow>
                   {...smallTableProps}
                   className="finance-report-table"
                   scroll={undefined}
                   pagination={false}
-                  rowKey={(r: Any) => `${r.currency}:${r.salesUserId ?? 'unassigned'}`}
+                  rowKey={(r) => `${r.currency}:${r.salesUserId ?? 'unassigned'}`}
                   loading={financeLoading}
                   dataSource={finance?.bySales || []}
                   columns={[
@@ -194,12 +278,12 @@ export default function Reports() {
                 />
               </Card>
               <Card title="产品拆分（按币种 × 产品）" size="small">
-                <Table
+                <Table<FinanceProductRow>
                   {...smallTableProps}
                   className="finance-report-table"
                   scroll={undefined}
                   pagination={false}
-                  rowKey={(r: Any) => `${r.currency}:${r.productId}`}
+                  rowKey={(r) => `${r.currency}:${r.productId}`}
                   loading={financeLoading}
                   dataSource={finance?.byProduct || []}
                   columns={[

@@ -6,17 +6,23 @@ import { PrismaService } from '../prisma/prisma.service';
 export class AuditService {
   constructor(private prisma: PrismaService) {}
 
-  /** 记录操作日志（尽力而为，失败不影响主流程） */
-  async log(p: {
-    operatorId?: number;
-    relatedType: string;
-    relatedId?: number;
-    action: string;
-    fieldName?: string;
-    oldValue?: string;
-    newValue?: string;
-    reason?: string;
-  }) {
+  /** 记录操作日志；传入事务时日志与业务写入保持原子性。 */
+  async log(
+    p: {
+      operatorId?: number;
+      relatedType: string;
+      relatedId?: number;
+      action: string;
+      fieldName?: string;
+      oldValue?: string;
+      newValue?: string;
+      reason?: string;
+    },
+    tx?: Prisma.TransactionClient,
+  ) {
+    if (tx) {
+      return tx.auditLog.create({ data: p });
+    }
     try {
       return await this.prisma.auditLog.create({ data: p });
     } catch {

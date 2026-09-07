@@ -1,30 +1,59 @@
 import { useEffect, useState } from 'react'
 import { Button, Form, Input, Modal, Select, Space, Table, Tag, message } from 'antd'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { ROLE_LABEL } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, pageTableProps } from '../components/tableLayout'
 
-type Any = Record<string, any>
+type UserRow = {
+  id: number
+  username: string
+  name: string
+  role: string
+  status: 'active' | 'disabled'
+}
+
+type UserForm = {
+  username?: string
+  name: string
+  password?: string
+  role: string
+  status?: UserRow['status']
+}
+
+const fetchUsers = (signal?: AbortSignal) => client.get<UserRow[]>('/users', { signal })
 
 export default function Users() {
   const { user, impersonate } = useAuth()
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const [rows, setRows] = useState<UserRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [reloadKey, setReloadKey] = useState(0)
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [impersonatingId, setImpersonatingId] = useState<number | null>(null)
-  const [editing, setEditing] = useState<Any | null>(null)
-  const [form] = Form.useForm()
+  const [editing, setEditing] = useState<UserRow | null>(null)
+  const [form] = Form.useForm<UserForm>()
 
-  const load = () => {
+  const reload = () => {
     setLoading(true)
-    client.get('/users').then((r) => setRows(r.data)).finally(() => setLoading(false))
+    setReloadKey((current) => current + 1)
   }
-  useEffect(load, [])
+  useEffect(() => {
+    const controller = new AbortController()
+    let active = true
+    void fetchUsers(controller.signal)
+      .then((response) => { if (active) setRows(response.data) })
+      .catch((error: unknown) => { if (active) message.error(apiErrorMessage(error, '用户数据加载失败')) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [reloadKey])
 
-  const openForm = (rec?: Any) => {
+  const openForm = (rec?: UserRow) => {
     setEditing(rec || null)
     form.resetFields()
     if (rec) form.setFieldsValue(rec)
@@ -38,9 +67,9 @@ export default function Users() {
       else await client.post('/users', v)
       message.success('已保存')
       setOpen(false)
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+      reload()
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -49,12 +78,12 @@ export default function Users() {
     try {
       await client.delete(`/users/${id}`)
       message.success('已删除')
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+      reload()
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
-  const doImpersonate = (r: Any) => {
+  const doImpersonate = (r: UserRow) => {
     Modal.confirm({
       title: `登录该账户：${r.name}`,
       content: (
@@ -71,8 +100,8 @@ export default function Users() {
         try {
           await impersonate(r.id)
           window.location.assign('/')
-        } catch (e: any) {
-          message.error(e.response?.data?.message || '代理登录失败')
+        } catch (error: unknown) {
+          message.error(apiErrorMessage(error, '代理登录失败'))
           setImpersonatingId(null)
         }
       },
@@ -82,13 +111,13 @@ export default function Users() {
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={() => openForm()}>新增用户</Button>
-      <Table
+      <Table<UserRow>
         {...pageTableProps}
         rowKey="id"
         loading={loading}
         dataSource={rows}
         columns={[
-          { title: '用户编号', width: COL.no, render: (_: any, r: Any) => 'YH' + String(r.id).padStart(6, '0') },
+          { title: '用户编号', width: COL.no, render: (_, r) => 'YH' + String(r.id).padStart(6, '0') },
           { title: '账号', dataIndex: 'username', width: COL.name },
           { title: '姓名', dataIndex: 'name', width: COL.person },
           { title: '角色', dataIndex: 'role', width: COL.status, render: (r) => <Tag color="blue">{ROLE_LABEL[r]}</Tag> },

@@ -1,14 +1,75 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Card, Col, Row, Segmented, Spin, Table, Tag } from 'antd'
+import { Alert, Button, Card, Col, Row, Segmented, Spin, Table, Tag, type TableColumnsType } from 'antd'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { CURRENCY_LABEL, CUSTOMER_STATUS_LABEL, CUSTOMER_STATUS_STYLE, fmtMoney } from '../api/types'
 import { moneyIn, moneyOut } from '../api/money'
 import { COL, smallTableProps } from '../components/tableLayout'
 import { sortChannelLeadStats } from '../utils/channelSort'
 
-type Any = Record<string, any>
 type TrendPoint = { date: string; label: string; leads: number; signed: number }
 type TrendRange = 15 | 30
+type MoneyField = 'receivableAmount' | 'paidAmount'
+type MoneyByCurrencyRow = {
+  currency: string
+  _sum?: Partial<Record<MoneyField, number | string | null>>
+}
+type LeadCountRow = {
+  key?: string
+  productId?: number
+  ownerUserId?: number
+  name: string
+  type?: string
+  category?: string | null
+  customerCount?: number
+  signedCount: number
+}
+type StatusCountRow = { mainStatus: string; _count: number }
+type ReferralSummaryRow = {
+  currency: string
+  collectionStatus: string
+  _count: number
+  _sum?: { commissionAmount?: number | string | null }
+}
+
+type DashboardData =
+  | {
+      role: 'ADMIN'
+      counts: {
+        custTotal: number
+        newToday: number
+        newMonth: number
+        signedMonth: number
+        problem: number
+        pendingReview: number
+        pendingPay: number
+      }
+      leadStats: {
+        channels: LeadCountRow[]
+        products: LeadCountRow[]
+        sales: LeadCountRow[]
+      }
+      trend: TrendPoint[]
+    }
+  | {
+      role: 'SALES'
+      counts: { myCustomers: number; overdue: number; signedMonth: number }
+      byCurrency: { orders: MoneyByCurrencyRow[] }
+    }
+  | {
+      role: 'BUSINESS_SUPERVISOR'
+      counts: {
+        registeredTotal: number
+        registeredMonth: number
+        myCustomers: number
+        overdue: number
+        signedMonth: number
+      }
+      byCurrency: { orders: MoneyByCurrencyRow[] }
+      byStatus: StatusCountRow[]
+    }
+  | { role: 'DOWNSTREAM_SALES'; referrals: ReferralSummaryRow[] }
+  | { role: 'MARKET'; counts: { total: number; newMonth: number }; byStatus: StatusCountRow[] }
 
 function PageHead({ eyebrow, title }: { eyebrow: string; title: string }) {
   const today = new Date()
@@ -45,9 +106,15 @@ function Stat({ title, value, unit, color }: { title: string; value: ReactNode; 
   )
 }
 
-function MoneyByCurrency({ rows, fields }: { rows: Any[]; fields: [string, string, ('in' | 'out')?][] }) {
+function MoneyByCurrency({
+  rows,
+  fields,
+}: {
+  rows: MoneyByCurrencyRow[]
+  fields: [MoneyField, string, ('in' | 'out')?][]
+}) {
   return (
-    <Table
+    <Table<MoneyByCurrencyRow>
       {...smallTableProps}
       pagination={false}
       rowKey={(r) => r.currency}
@@ -58,7 +125,7 @@ function MoneyByCurrency({ rows, fields }: { rows: Any[]; fields: [string, strin
           title,
           width: COL.money,
           align: 'right' as const,
-          render: (_: any, r: Any) => {
+          render: (_: unknown, r: MoneyByCurrencyRow) => {
             const val = r._sum?.[key]
             return tone === 'in' ? moneyIn(val) : tone === 'out' ? moneyOut(val) : fmtMoney(val)
           },
@@ -75,14 +142,14 @@ function LeadCountTable({
   extraColumns = [],
   showCustomerCount = true,
 }: {
-  rows: Any[]
-  rowKey: (r: Any) => string | number
+  rows: LeadCountRow[]
+  rowKey: (r: LeadCountRow) => string | number
   nameTitle: string
-  extraColumns?: Any[]
+  extraColumns?: TableColumnsType<LeadCountRow>
   showCustomerCount?: boolean
 }) {
   return (
-    <Table
+    <Table<LeadCountRow>
       {...smallTableProps}
       pagination={false}
       rowKey={rowKey}
@@ -228,14 +295,69 @@ function TrendChart({ rows }: { rows: TrendPoint[] }) {
 }
 
 export default function Dashboard() {
-  const [data, setData] = useState<Any | null>(null)
+  const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [reloadKey, setReloadKey] = useState(0)
   const [trendDays, setTrendDays] = useState<TrendRange>(30)
   useEffect(() => {
-    client.get('/reports/dashboard').then((r) => setData(r.data)).finally(() => setLoading(false))
-  }, [])
-  if (loading) return <Spin />
-  if (!data) return null
+    const controller = new AbortController()
+    let active = true
+    void client.get<DashboardData>('/reports/dashboard', { signal: controller.signal })
+      .then((response) => {
+        if (!active) return
+        setData(response.data)
+        setLoadError('')
+      })
+      .catch((error: unknown) => {
+        if (!active || controller.signal.aborted) return
+        setData(null)
+        setLoadError(apiErrorMessage(error, '数据总览加载失败'))
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [reloadKey])
+
+  const retry = () => {
+    setLoadError('')
+    setLoading(true)
+    setReloadKey((current) => current + 1)
+  }
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+        <Spin />
+        <span>正在加载数据总览…</span>
+      </div>
+    )
+  }
+  if (loadError) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message="数据总览加载失败"
+        description={loadError}
+        action={<Button size="small" onClick={retry}>重试</Button>}
+      />
+    )
+  }
+  if (!data) {
+    return (
+      <Alert
+        type="warning"
+        showIcon
+        message="暂无可显示的数据"
+        action={<Button size="small" onClick={retry}>重新加载</Button>}
+      />
+    )
+  }
 
   if (data.role === 'ADMIN') {
     const c = data.counts
@@ -283,7 +405,7 @@ export default function Dashboard() {
         <Card size="small">
           <LeadCountTable
             rows={channelLeadStats}
-            rowKey={(r) => r.key}
+            rowKey={(r) => r.key ?? r.name}
             nameTitle="渠道"
             extraColumns={[{ title: '类型', dataIndex: 'type', width: COL.type }]}
           />
@@ -292,7 +414,7 @@ export default function Dashboard() {
         <Card size="small">
           <LeadCountTable
             rows={data.leadStats?.products}
-            rowKey={(r) => r.productId}
+            rowKey={(r) => r.productId ?? r.name}
             nameTitle="产品"
             extraColumns={[{ title: '类别', dataIndex: 'category', width: COL.type, render: (v: string) => v || '—' }]}
             showCustomerCount={false}
@@ -302,7 +424,7 @@ export default function Dashboard() {
         <Card size="small">
           <LeadCountTable
             rows={data.leadStats?.sales}
-            rowKey={(r) => r.ownerUserId}
+            rowKey={(r) => r.ownerUserId ?? r.name}
             nameTitle="销售"
           />
         </Card>
@@ -353,7 +475,7 @@ export default function Dashboard() {
         </Card>
         <SectionTitle eyebrow="STATUS" title="登记线索按状态分布" />
         <Card size="small">
-          {(data.byStatus || []).map((s: Any) => (
+          {data.byStatus.map((s) => (
             <Tag key={s.mainStatus} style={{ ...CUSTOMER_STATUS_STYLE[s.mainStatus], marginBottom: 8, fontSize: 14, padding: '2px 10px' }}>
               {CUSTOMER_STATUS_LABEL[s.mainStatus]}：{s._count}
             </Tag>
@@ -368,7 +490,7 @@ export default function Dashboard() {
       <div>
         <PageHead eyebrow="总览 · OVERVIEW" title="我的转介绍收佣" />
         <Card size="small">
-          <Table
+          <Table<ReferralSummaryRow>
             {...smallTableProps}
             pagination={false}
             rowKey={(r) => r.currency + r.collectionStatus}
@@ -377,7 +499,7 @@ export default function Dashboard() {
               { title: '币种', dataIndex: 'currency', width: COL.currency, render: (c) => <b>{CURRENCY_LABEL[c]}</b> },
               { title: '状态', dataIndex: 'collectionStatus', width: COL.status, render: (s) => (s === 'COLLECTED' ? '已收款' : '待收款') },
               { title: '笔数', dataIndex: '_count', width: COL.count },
-              { title: '金额', width: COL.money, align: 'right', render: (_: any, r: Any) => fmtMoney(r._sum?.commissionAmount) },
+              { title: '金额', width: COL.money, align: 'right', render: (_, r) => fmtMoney(r._sum?.commissionAmount) },
             ]}
           />
         </Card>
@@ -395,7 +517,7 @@ export default function Dashboard() {
       </Row>
       <SectionTitle eyebrow="STATUS" title="按状态分布" />
       <Card size="small">
-        {(data.byStatus || []).map((s: Any) => (
+        {data.byStatus.map((s) => (
           <Tag key={s.mainStatus} style={{ ...CUSTOMER_STATUS_STYLE[s.mainStatus], marginBottom: 8, fontSize: 14, padding: '2px 10px' }}>
             {CUSTOMER_STATUS_LABEL[s.mainStatus]}：{s._count}
           </Tag>

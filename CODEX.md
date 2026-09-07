@@ -200,7 +200,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
 - 用户管理页：`frontend/src/pages/Users.tsx`，按钮文案是“登录该账户”
 - 全局横幅：`frontend/src/components/ImpersonationBanner.tsx`
-- 登录状态：`frontend/src/auth/AuthContext.tsx`
+- 登录状态与 Hook：`frontend/src/auth/AuthContext.ts`；Provider：`frontend/src/auth/AuthProvider.tsx`
 - 日志展示：`frontend/src/pages/AuditLogs.tsx` 的“代理登录日志”标签页
 
 ## UI 规范
