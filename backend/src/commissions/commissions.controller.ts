@@ -76,6 +76,22 @@ export class CommissionsController {
     );
   }
 
+  @Post(':id/migrate-to-each-payment')
+  migrateToEachPayment(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseIntPipe) id: number,
+    @Body()
+    body: {
+      expectedCustomerNo?: string;
+      expectedOrderNo?: string;
+      reason?: string;
+      confirm?: boolean;
+      previewFingerprint?: string;
+    },
+  ) {
+    return this.commissions.migrateToEachPayment(user, id, body);
+  }
+
   @Post(':id/suspend')
   suspend(
     @Param('id', ParseIntPipe) id: number,

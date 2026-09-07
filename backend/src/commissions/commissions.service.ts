@@ -13,6 +13,7 @@ import {
   RefundStatus,
   SettlementCondition,
 } from '@prisma/client';
+import { createHash } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { AuditService } from '../audit/audit.service';
@@ -34,6 +35,52 @@ export class CommissionsService {
     private ledger: LedgerService,
     private audit: AuditService,
   ) {}
+
+  private async serializableTransaction<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await this.prisma.$transaction(operation, {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        });
+      } catch (error) {
+        if ((error as { code?: string })?.code === 'P2034') {
+          if (attempt < 2) continue;
+          throw new BadRequestException('记录正在更新，请稍后重试');
+        }
+        throw error;
+      }
+    }
+    throw new BadRequestException('操作未完成，请稍后重试');
+  }
+
+  private migrationPreviewFingerprint(c: {
+    updatedAt: Date;
+    order: {
+      payments: {
+        id: number;
+        amount: unknown;
+        confirmStatus: PaymentConfirmStatus;
+        confirmedAt: Date | null;
+        updatedAt: Date;
+      }[];
+    };
+  }) {
+    const snapshot = {
+      commissionUpdatedAt: c.updatedAt.toISOString(),
+      payments: [...c.order.payments]
+        .sort((a, b) => a.id - b.id)
+        .map((payment) => ({
+          id: payment.id,
+          updatedAt: payment.updatedAt.toISOString(),
+          amount: String(payment.amount),
+          confirmStatus: payment.confirmStatus,
+          confirmedAt: payment.confirmedAt?.toISOString() ?? null,
+        })),
+    };
+    return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex');
+  }
 
   // ============ 生成（实时触发） ============
 
@@ -739,6 +786,193 @@ export class CommissionsService {
       offset,
       cashOut,
     };
+  }
+
+  /** 将采用旧渠道规则的既有返佣安全迁移为“每笔到账后”。 */
+  async migrateToEachPayment(
+    user: AuthUser,
+    id: number,
+    input?: {
+      expectedCustomerNo?: string;
+      expectedOrderNo?: string;
+      reason?: string;
+      confirm?: boolean;
+      previewFingerprint?: string;
+    },
+  ) {
+    const normalizedReason = input?.reason?.trim();
+    const expectedCustomerNo = input?.expectedCustomerNo?.trim();
+    const expectedOrderNo = input?.expectedOrderNo?.trim();
+    if (!normalizedReason) {
+      throw new BadRequestException('请填写调整原因');
+    }
+    if (normalizedReason.length > 500) {
+      throw new BadRequestException('调整原因不能超过 500 个字符');
+    }
+    if (!expectedCustomerNo || !expectedOrderNo) {
+      throw new BadRequestException('请填写要核对的客户号和订单号');
+    }
+
+    return this.serializableTransaction(async (tx) => {
+      const c = await tx.commission.findFirst({
+        where: { id, deletedAt: null },
+        include: {
+          customer: { select: { id: true, name: true, customerNo: true } },
+          channel: { select: { settlementCondition: true } },
+          order: {
+            include: {
+              payments: {
+                where: { deletedAt: null },
+                orderBy: { id: 'asc' },
+              },
+            },
+          },
+        },
+      });
+      if (!c) throw new NotFoundException('分成记录不存在');
+      if (
+        c.customer.customerNo !== expectedCustomerNo ||
+        c.order.orderNo !== expectedOrderNo
+      ) {
+        throw new BadRequestException('客户号或订单号与分成记录不一致');
+      }
+      if (c.fundSettlementMode !== FundSettlementMode.COMPANY_REBATE) {
+        throw new BadRequestException('仅公司代收·返佣可迁移为每笔到账后');
+      }
+      if (c.commissionMethodSnapshot !== CommissionMethod.NET_RECEIVED_RATIO) {
+        throw new BadRequestException('每笔到账后结算仅支持按实收比例返佣');
+      }
+      if (c.status === CommissionStatus.CANCELLED) {
+        throw new BadRequestException('已取消的分成不能迁移');
+      }
+      if (c.suspended) {
+        throw new BadRequestException('分成已挂起，请先解除挂起');
+      }
+
+      const state = this.eachPaymentState(c);
+      const paidAmount = roundMoney(Number(c.paidAmount));
+      if (paidAmount > state.totalPayable) {
+        throw new BadRequestException('已付返佣超过分笔重算金额，请人工核对');
+      }
+      const calcBaseAmount = roundMoney(
+        c.order.payments.reduce(
+          (sum, payment) => sum + Number(payment.amount),
+          0,
+        ),
+      );
+      const previewFingerprint = this.migrationPreviewFingerprint(c);
+      const result = {
+        commissionId: c.id,
+        commissionNo: c.commissionNo,
+        customerId: c.customer.id,
+        customerNo: c.customer.customerNo,
+        customerName: c.customer.name,
+        orderId: c.order.id,
+        orderNo: c.order.orderNo,
+        previewFingerprint,
+        settlementCondition: SettlementCondition.ON_EACH_PAYMENT,
+        calcBaseAmount,
+        payableAmount: state.totalPayable,
+        paidAmount,
+        unpaidAmount: state.unpaidAmount,
+        status: state.status,
+        installments: state.installments.map((installment) => ({
+          paymentId: installment.payment.id,
+          paymentNo: installment.payment.paymentNo,
+          confirmStatus: installment.payment.confirmStatus,
+          payableAmount: installment.payableAmount,
+          paidAmount: installment.paidAmount,
+          unpaidAmount: installment.unpaidAmount,
+          status: installment.status,
+        })),
+      };
+
+      // 幂等重试不会重复迁移或重复写审计日志。
+      if (c.settlementCondition === SettlementCondition.ON_EACH_PAYMENT) {
+        return { migrated: false, dryRun: false, ...result };
+      }
+      if (c.settlementCondition !== SettlementCondition.ON_FULL_PAYMENT) {
+        throw new BadRequestException('仅“缴清后”的既有返佣可执行此迁移');
+      }
+      if (
+        c.channel.settlementCondition !== SettlementCondition.ON_EACH_PAYMENT
+      ) {
+        throw new BadRequestException('当前渠道尚未设置为每笔到账后');
+      }
+      if (input?.confirm !== true) {
+        return { migrated: false, dryRun: true, ...result };
+      }
+      if (!input.previewFingerprint) {
+        throw new BadRequestException('请先预览调整结果，再确认执行');
+      }
+      if (input.previewFingerprint !== previewFingerprint) {
+        throw new BadRequestException('返佣记录已发生变化，请重新预览后再确认');
+      }
+
+      const oldValue = JSON.stringify({
+        settlementCondition: c.settlementCondition,
+        calcBaseType: c.calcBaseType,
+        calcBaseAmount: Number(c.calcBaseAmount),
+        payableAmount: Number(c.payableAmount),
+        paidAmount,
+        unpaidAmount: Number(c.unpaidAmount),
+        status: c.status,
+      });
+      const newValue = JSON.stringify({
+        settlementCondition: SettlementCondition.ON_EACH_PAYMENT,
+        calcBaseType: '每笔实收',
+        calcBaseAmount,
+        payableAmount: state.totalPayable,
+        paidAmount,
+        unpaidAmount: state.unpaidAmount,
+        status: state.status,
+      });
+
+      const claimed = await tx.commission.updateMany({
+        where: {
+          id: c.id,
+          updatedAt: c.updatedAt,
+          settlementCondition: SettlementCondition.ON_FULL_PAYMENT,
+        },
+        data: {
+          settlementCondition: SettlementCondition.ON_EACH_PAYMENT,
+          calcBaseType: '每笔实收',
+          calcBaseAmount,
+          payableAmount: state.totalPayable,
+          unpaidAmount: state.unpaidAmount,
+          status: state.status,
+          expectedSettlementAt:
+            state.dueInstallment?.payment.confirmedAt ??
+            (state.dueInstallment ? new Date() : null),
+        },
+      });
+      if (claimed.count !== 1) {
+        const current = await tx.commission.findUnique({
+          where: { id: c.id },
+          select: { settlementCondition: true },
+        });
+        if (
+          current?.settlementCondition === SettlementCondition.ON_EACH_PAYMENT
+        ) {
+          return { migrated: false, dryRun: false, ...result };
+        }
+        throw new BadRequestException('返佣记录刚刚发生变化，请重新预览后再确认');
+      }
+      await tx.auditLog.create({
+        data: {
+          operatorId: user.id,
+          relatedType: 'Commission',
+          relatedId: c.id,
+          action: 'MIGRATE_COMMISSION_TO_EACH_PAYMENT',
+          fieldName: 'settlementCondition',
+          oldValue,
+          newValue,
+          reason: normalizedReason,
+        },
+      });
+
+      return { migrated: true, dryRun: false, ...result };
+    });
   }
 
   async suspend(id: number, note?: string) {
