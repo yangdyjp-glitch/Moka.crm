@@ -35,10 +35,10 @@ cd frontend && npm install && npm run dev   # 或 npm run build
 - **编号**：6 位顺序号，前缀 用户YH/客户KH/订单DD/收款SK/退款TK/分成FC/渠道QD/合同HT；`nextNo(delegate, field, prefix)` 取 max+1。
 
 ## UI 规范
-- 背景淡绿 `#e9f5ec`；主色绿+金；**所有框体直角**（borderRadius 0）；
+- 背景淡粉紫 `#f8eef6`；主色粉紫 `#a64d8e` + 金；**所有框体直角**（borderRadius 0）；
 - 字体：思源宋体 Noto Serif SC（`--font-serif`），数字用 Times New Roman（`NumTNR` @font-face + unicode-range 技巧，见 `index.css`）。
 - 线条淡金色：**竖线 2px、横线 1px**。
-- 收款金额绿色 `#16a34a`、退款红色 `#dc2626`（`api/money.tsx`）。主操作按钮深绿。侧边栏深绿→金渐变。
+- 收款金额绿色 `#16a34a`、退款红色 `#dc2626`（`api/money.tsx`）。主操作按钮深粉紫。侧边栏深粉紫→粉紫→金渐变。
 - 订单页固定 12 条/页，无每页条数选择器；表格列宽固定。
 - 客户/订单号/用户名全程可点击跳详情；客户列表意向/状态/来源渠道可点击快改。
 

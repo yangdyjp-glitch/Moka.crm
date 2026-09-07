@@ -65,7 +65,7 @@ export default function AppLayout() {
 
   return (
     <Layout style={{ height: '100%' }}>
-      <Layout.Sider width={224} style={{ background: 'linear-gradient(180deg, #14532d 0%, #2f7d4f 50%, #c2a02e 100%)', boxShadow: '4px 0 24px rgba(20, 83, 45, 0.22)', position: 'relative', zIndex: 2 }}>
+      <Layout.Sider width={224} style={{ background: 'linear-gradient(180deg, #57224e 0%, #a64d8e 52%, #c2a02e 100%)', boxShadow: '4px 0 24px rgba(87, 34, 78, 0.25)', position: 'relative', zIndex: 2 }}>
         <div style={{ padding: '20px 18px 16px' }}>
           <div style={{ color: '#fff', fontWeight: 900, fontSize: 22, letterSpacing: 1 }}>矩阵 CRM</div>
           <div style={{ color: 'rgba(255,255,255,0.6)', fontSize: 11, letterSpacing: 3, marginTop: 2 }}>MATRIX CRM</div>
@@ -80,7 +80,7 @@ export default function AppLayout() {
         />
         <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: 16, borderTop: '1px solid rgba(255,255,255,0.22)', background: 'rgba(0,0,0,0.3)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Avatar shape="square" style={{ background: '#ffffff', color: '#166534', fontWeight: 700 }}>矩</Avatar>
+            <Avatar shape="square" style={{ background: '#ffffff', color: '#83366f', fontWeight: 700 }}>矩</Avatar>
             <div style={{ overflow: 'hidden' }}>
               <div style={{ color: '#fff', fontSize: 13, fontWeight: 600 }}>{user?.name}</div>
               <div style={{ color: 'rgba(255,255,255,0.62)', fontSize: 11 }}>{user?.username} · {ROLE_LABEL[role]}</div>

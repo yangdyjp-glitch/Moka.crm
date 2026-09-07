@@ -205,12 +205,12 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
 ## UI 规范
 
-- 背景淡绿：`#e9f5ec`
-- 主色：绿色 + 金色
+- 背景淡粉紫：`#f8eef6`
+- 主色：粉紫色（`#a64d8e`）+ 金色
 - 金色线条：横线 1px，竖线 2px
 - 收款金额绿色：`#16a34a`
 - 退款金额红色：`#dc2626`
-- 侧边栏深绿到金色渐变
+- 侧边栏深粉紫到粉紫、再到金色渐变
 - 字体：思源宋体 / Noto Serif SC；数字使用 Times New Roman 技巧，见 `frontend/src/index.css`
 - 表格列宽尽量稳定，订单页固定每页 12 条，不显示每页条数选择器
 

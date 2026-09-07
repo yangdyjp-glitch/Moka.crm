@@ -15,7 +15,7 @@ function PageHead({ eyebrow, title }: { eyebrow: string; title: string }) {
   const d = `${today.getFullYear()}/${today.getMonth() + 1}/${today.getDate()}`
   return (
     <div style={{ borderBottom: '1px solid #d4bb63', paddingBottom: 10, marginBottom: 14 }}>
-      <div style={{ fontSize: 11, letterSpacing: 3, color: '#15803d', textTransform: 'uppercase', marginBottom: 4, fontWeight: 700 }}>{eyebrow}</div>
+      <div style={{ fontSize: 11, letterSpacing: 3, color: '#a64d8e', textTransform: 'uppercase', marginBottom: 4, fontWeight: 700 }}>{eyebrow}</div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
         <div style={{ fontSize: 30, fontWeight: 900, letterSpacing: 1, color: '#0f172a' }}>{title}</div>
         <div style={{ color: '#9aa3b2', fontSize: 13 }}>数据快照 · {d}</div>
@@ -27,7 +27,7 @@ function PageHead({ eyebrow, title }: { eyebrow: string; title: string }) {
 function SectionTitle({ eyebrow, title }: { eyebrow: string; title: string }) {
   return (
     <div style={{ margin: '14px 0 8px' }}>
-      <div style={{ fontSize: 10, letterSpacing: 2, color: '#15803d', textTransform: 'uppercase', fontWeight: 700 }}>{eyebrow}</div>
+      <div style={{ fontSize: 10, letterSpacing: 2, color: '#a64d8e', textTransform: 'uppercase', fontWeight: 700 }}>{eyebrow}</div>
       <div style={{ fontSize: 18, fontWeight: 800, color: '#0f172a' }}>{title}</div>
     </div>
   )
@@ -157,21 +157,21 @@ function TrendChart({ rows }: { rows: TrendPoint[] }) {
       <svg viewBox={`0 0 ${width} ${height}`} style={{ display: 'block', width: '100%', height }}>
         <defs>
           <linearGradient id="trendLeadBar" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="#22a447" />
-            <stop offset="100%" stopColor="#15803d" />
+            <stop offset="0%" stopColor="#c86aac" />
+            <stop offset="100%" stopColor="#a64d8e" />
           </linearGradient>
           <linearGradient id="trendSignedBar" x1="0" x2="0" y1="0" y2="1">
             <stop offset="0%" stopColor="#d4a52c" />
             <stop offset="100%" stopColor="#b8860b" />
           </linearGradient>
         </defs>
-        <rect x={left} y={top} width={plotW} height={plotH} rx="10" fill="#fbfdf8" />
+        <rect x={left} y={top} width={plotW} height={plotH} rx="10" fill="#fdf8fb" />
         <text x={left} y={18} fill="#64748b" fontSize="12">客户数量</text>
         {yTicks.map((tick) => {
           const y = yAt(tick)
           return (
             <g key={tick}>
-              <line x1={left} y1={y} x2={width - right} y2={y} stroke={tick === 0 ? '#d4bb63' : '#e7ecd9'} strokeWidth="1" vectorEffect="non-scaling-stroke" />
+              <line x1={left} y1={y} x2={width - right} y2={y} stroke={tick === 0 ? '#d4bb63' : '#f0e3ec'} strokeWidth="1" vectorEffect="non-scaling-stroke" />
               <text x={left - 10} y={y + 4} textAnchor="end" fill="#7c8797" fontSize="12">{formatTick(tick)}</text>
             </g>
           )
@@ -184,7 +184,7 @@ function TrendChart({ rows }: { rows: TrendPoint[] }) {
               y1={top}
               x2={xAt(i)}
               y2={height - bottom}
-              stroke="#edf3e9"
+              stroke="#f4e8f0"
               strokeWidth="1"
               vectorEffect="non-scaling-stroke"
             />
@@ -242,9 +242,9 @@ export default function Dashboard() {
     const trendRows = (data.trend || []).slice(-trendDays)
     const channelLeadStats = sortChannelLeadStats(data.leadStats?.channels)
     const cards: [string, number, string, string][] = [
-      ['客户总数', c.custTotal, '位', '#166534'],
-      ['今日新增', c.newToday, '', '#15803d'],
-      ['本月新增', c.newMonth, '', '#059669'],
+      ['客户总数', c.custTotal, '位', '#6f2c62'],
+      ['今日新增', c.newToday, '', '#a64d8e'],
+      ['本月新增', c.newMonth, '', '#c05aa3'],
       ['本月签约', c.signedMonth, '单', '#b8860b'],
       ['待审核分成', c.pendingReview, '', '#f59e0b'],
       ['待确认收款', c.pendingPay, '', '#10b981'],
@@ -262,9 +262,9 @@ export default function Dashboard() {
         </div>
         <SectionTitle eyebrow="TREND" title={`线索与签单趋势（近${trendDays}天）`} />
         <Card size="small" styles={{ body: { padding: 0, overflow: 'hidden' } }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', padding: '14px 16px 8px', borderBottom: '1px solid #edf2e6' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', padding: '14px 16px 8px', borderBottom: '1px solid #f2e7ee' }}>
             <div style={{ display: 'flex', gap: 18, alignItems: 'center', color: '#334155', fontSize: 13 }}>
-              <span><i style={{ display: 'inline-block', width: 12, height: 12, background: '#15803d', marginRight: 7, verticalAlign: 'middle' }} />线索数量</span>
+              <span><i style={{ display: 'inline-block', width: 12, height: 12, background: '#a64d8e', marginRight: 7, verticalAlign: 'middle' }} />线索数量</span>
               <span><i style={{ display: 'inline-block', width: 12, height: 12, background: '#b8860b', marginRight: 7, verticalAlign: 'middle' }} />签单数量</span>
             </div>
             <Segmented
@@ -316,9 +316,9 @@ export default function Dashboard() {
       <div>
         <PageHead eyebrow="总览 · OVERVIEW" title="我的业绩" />
         <Row gutter={[14, 10]}>
-          <Col xs={12} lg={8}><Stat title="我的客户" value={c.myCustomers} unit="位" color="#166534" /></Col>
+          <Col xs={12} lg={8}><Stat title="我的客户" value={c.myCustomers} unit="位" color="#6f2c62" /></Col>
           <Col xs={12} lg={8}><Stat title="逾期未跟进" value={c.overdue} color="#ef4444" /></Col>
-          <Col xs={12} lg={8}><Stat title="本月签约" value={c.signedMonth} unit="单" color="#15803d" /></Col>
+          <Col xs={12} lg={8}><Stat title="本月签约" value={c.signedMonth} unit="单" color="#a64d8e" /></Col>
         </Row>
         <SectionTitle eyebrow="FINANCE" title="我的订单金额（分币种）" />
         <Card size="small">
@@ -331,9 +331,9 @@ export default function Dashboard() {
   if (data.role === 'BUSINESS_SUPERVISOR') {
     const c = data.counts
     const cards: [string, number, string, string][] = [
-      ['我登记的线索', c.registeredTotal, '位', '#166534'],
-      ['本月登记', c.registeredMonth, '', '#15803d'],
-      ['负责客户', c.myCustomers, '位', '#059669'],
+      ['我登记的线索', c.registeredTotal, '位', '#6f2c62'],
+      ['本月登记', c.registeredMonth, '', '#a64d8e'],
+      ['负责客户', c.myCustomers, '位', '#c05aa3'],
       ['逾期未跟进', c.overdue, '', '#ef4444'],
       ['本月签约', c.signedMonth, '单', '#b8860b'],
     ]
@@ -390,8 +390,8 @@ export default function Dashboard() {
     <div>
       <PageHead eyebrow="总览 · OVERVIEW" title="我登记的线索" />
       <Row gutter={[14, 10]}>
-        <Col xs={12} lg={8}><Stat title="我登记的客户" value={c.total} unit="位" color="#166534" /></Col>
-        <Col xs={12} lg={8}><Stat title="本月登记" value={c.newMonth} color="#15803d" /></Col>
+        <Col xs={12} lg={8}><Stat title="我登记的客户" value={c.total} unit="位" color="#6f2c62" /></Col>
+        <Col xs={12} lg={8}><Stat title="本月登记" value={c.newMonth} color="#a64d8e" /></Col>
       </Row>
       <SectionTitle eyebrow="STATUS" title="按状态分布" />
       <Card size="small">
