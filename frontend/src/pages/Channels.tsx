@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  Alert,
   Button,
   Form,
   Input,
@@ -32,6 +33,7 @@ export default function Channels() {
   const isAdmin = user?.role === 'ADMIN'
   const [rows, setRows] = useState<Any[]>([])
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState('')
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [editing, setEditing] = useState<Any | null>(null)
@@ -50,10 +52,14 @@ export default function Channels() {
 
   const load = () => {
     setLoading(true)
-    client.get('/channels').then((r) => setRows(r.data)).finally(() => setLoading(false))
+    setLoadError('')
+    client.get('/channels', { noCache: true } as any)
+      .then((r) => setRows(r.data))
+      .catch((e) => setLoadError(e.response?.data?.message || '渠道数据加载失败，请检查后端或数据库连接'))
+      .finally(() => setLoading(false))
   }
   const loadAcq = () => {
-    client.get('/acquisition-channels/all').then((r) => setAcqRows(r.data))
+    client.get('/acquisition-channels/all', { noCache: true } as any).then((r) => setAcqRows(r.data))
   }
   useEffect(() => { load(); loadAcq() }, [])
 
@@ -127,15 +133,24 @@ export default function Channels() {
   }
 
   return (
-    <div className="channels-page">
-      <div className="channels-primary-section">
-        <Button type="primary" style={{ marginBottom: 16, alignSelf: 'flex-start' }} onClick={() => openForm()}>
+    <div>
+      <div>
+        <Button type="primary" style={{ marginBottom: 16 }} onClick={() => openForm()}>
           {isAdmin ? '新增渠道' : '新增个人渠道'}
         </Button>
+        {loadError && (
+          <Alert
+            type="error"
+            showIcon
+            message={loadError}
+            action={<Button size="small" onClick={load}>重新加载</Button>}
+            style={{ marginBottom: 16 }}
+          />
+        )}
         <Table
           {...scrollTableProps}
-          className="channels-primary-table"
-          scroll={{ x: 'max-content', y: '100%' }}
+          pagination={false}
+          scroll={{ x: 'max-content' }}
           rowKey="id"
           loading={loading}
           dataSource={sortedRows}
@@ -225,7 +240,7 @@ export default function Channels() {
         </Form>
       </Modal>
 
-      <div className="channels-dictionary-section">
+      <div style={{ marginTop: 28 }}>
         <Space style={{ marginBottom: 12 }} wrap>
           <b style={{ fontSize: 15 }}>获取渠道字典（自获取来源用）</b>
           <Button type="primary" onClick={() => openAcq()}>新增获取渠道</Button>
