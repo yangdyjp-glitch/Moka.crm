@@ -3,25 +3,40 @@ import { Badge, Dropdown, Empty, List, message } from 'antd'
 import { BellOutlined } from '@ant-design/icons'
 import client from '../api/client'
 import { useAuth } from '../auth/AuthContext'
+import { useRemoteData } from '../hooks/useRemoteData'
 
-type Any = Record<string, any>
+interface NotificationRecord {
+  id: number
+  title: string
+  isRead: boolean
+}
+
+interface ScanResult {
+  scanned: {
+    overdue: number
+    pendingReview: number
+    unpaid: number
+  }
+}
+
+const loadUnreadCount = async () => {
+  const { data } = await client.get<{ count: number }>('/notifications/unread-count')
+  return data.count
+}
 
 export default function NotificationBell() {
   const { user } = useAuth()
-  const [count, setCount] = useState(0)
-  const [items, setItems] = useState<Any[]>([])
+  const { data: count, reload: reloadCount } = useRemoteData(loadUnreadCount, 0)
+  const [items, setItems] = useState<NotificationRecord[]>([])
   const [open, setOpen] = useState(false)
 
-  const loadCount = () =>
-    client.get('/notifications/unread-count').then((r) => setCount(r.data.count)).catch(() => {})
   const loadList = () =>
-    client.get('/notifications').then((r) => setItems(r.data)).catch(() => {})
+    client.get<NotificationRecord[]>('/notifications').then((r) => setItems(r.data)).catch(() => {})
 
   useEffect(() => {
-    loadCount()
-    const t = setInterval(loadCount, 60000)
+    const t = setInterval(reloadCount, 60000)
     return () => clearInterval(t)
-  }, [])
+  }, [reloadCount])
 
   const onOpen = (o: boolean) => {
     setOpen(o)
@@ -29,13 +44,13 @@ export default function NotificationBell() {
   }
   const readAll = async () => {
     await client.post('/notifications/read-all')
-    loadCount()
+    reloadCount()
     loadList()
   }
   const scan = async () => {
-    const { data } = await client.post('/notifications/scan')
+    const { data } = await client.post<ScanResult>('/notifications/scan')
     message.success(`扫描完成：逾期${data.scanned.overdue}，待审核${data.scanned.pendingReview}，未缴${data.scanned.unpaid}`)
-    loadCount()
+    reloadCount()
     loadList()
   }
 
@@ -49,10 +64,10 @@ export default function NotificationBell() {
         </span>
       </div>
       {items.length ? (
-        <List
+        <List<NotificationRecord>
           size="small"
           dataSource={items}
-          renderItem={(n: Any) => (
+          renderItem={(n) => (
             <List.Item style={{ opacity: n.isRead ? 0.45 : 1 }}>
               <Badge status={n.isRead ? 'default' : 'processing'} text={n.title} />
             </List.Item>

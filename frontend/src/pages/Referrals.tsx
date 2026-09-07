@@ -14,32 +14,59 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import client from '../api/client'
+import { getErrorMessage } from '../api/errors'
 import { CURRENCY_LABEL, fmtMoney } from '../api/types'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, pageTableProps } from '../components/tableLayout'
+import { useRemoteData } from '../hooks/useRemoteData'
 
-type Any = Record<string, any>
+interface CustomerOption {
+  id: number
+  name: string
+}
+
+interface ReferralRecord {
+  id: number
+  customer: CustomerOption
+  serviceType: string
+  downstreamCompany: string
+  commissionAmount: string | number
+  currency: 'CNY' | 'JPY'
+  settlementDate: string | null
+  collectionStatus: 'PENDING' | 'COLLECTED'
+}
+
+interface ReferralFormValues {
+  customerId: number
+  serviceType: string
+  downstreamCompany: string
+  commissionAmount: number
+  currency: ReferralRecord['currency']
+  settlementDate?: string
+}
 
 const SERVICE_TYPES = ['住房', '电话卡', '保险', '其他']
 
+const loadReferrals = async () => {
+  const { data } = await client.get<ReferralRecord[]>('/referrals')
+  return data
+}
+
 export default function Referrals() {
   const nav = useNavigate()
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const { data: rows, loading, error, reload } = useRemoteData(loadReferrals, [])
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [form] = Form.useForm()
-  const [customers, setCustomers] = useState<Any[]>([])
+  const [form] = Form.useForm<ReferralFormValues>()
+  const [customers, setCustomers] = useState<CustomerOption[]>([])
 
-  const load = () => {
-    setLoading(true)
-    client.get('/referrals').then((r) => setRows(r.data)).finally(() => setLoading(false))
-  }
-  useEffect(load, [])
+  useEffect(() => {
+    if (error) message.error(getErrorMessage(error, '转介绍收佣加载失败'))
+  }, [error])
 
   const openCreate = async () => {
     form.resetFields()
-    const c = await client.get('/customers', { params: { pageSize: 100 } })
+    const c = await client.get<{ items: CustomerOption[] }>('/customers', { params: { pageSize: 100 } })
     setCustomers(c.data.items)
     setOpen(true)
   }
@@ -50,31 +77,31 @@ export default function Referrals() {
       await client.post('/referrals', { ...v, settlementDate: v.settlementDate || undefined })
       message.success('已登记')
       setOpen(false)
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+      reload()
+    } catch (e) {
+      message.error(getErrorMessage(e, '操作失败'))
     } finally {
       setSubmitting(false)
     }
   }
   const toggle = async (id: number, action: 'collect' | 'uncollect') => {
     await client.post(`/referrals/${id}/${action}`)
-    load()
+    reload()
   }
   const del = async (id: number) => {
     try {
       await client.delete(`/referrals/${id}`)
       message.success('已删除')
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+      reload()
+    } catch (e) {
+      message.error(getErrorMessage(e, '删除失败'))
     }
   }
 
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={openCreate}>登记转介绍收佣</Button>
-      <Table
+      <Table<ReferralRecord>
         {...pageTableProps}
         rowKey="id"
         loading={loading}

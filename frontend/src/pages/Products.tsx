@@ -13,27 +13,50 @@ import {
   message,
 } from 'antd'
 import client from '../api/client'
+import { getErrorMessage } from '../api/errors'
 import { CURRENCY_LABEL, fmtMoney } from '../api/types'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps } from '../components/tableLayout'
+import { useRemoteData } from '../hooks/useRemoteData'
 
-type Any = Record<string, any>
+interface ProductRecord {
+  id: number
+  name: string
+  category: string | null
+  standardPrice: string | number
+  currency: 'CNY' | 'JPY'
+  participateCommission: boolean
+  allowDiscount: boolean
+  status: string
+}
+
+interface ProductFormValues {
+  name: string
+  category?: string | null
+  standardPrice: number
+  currency: ProductRecord['currency']
+  participateCommission: boolean
+  allowDiscount: boolean
+  status?: string
+}
+
+const loadProducts = async () => {
+  const { data } = await client.get<ProductRecord[]>('/products', { params: { all: 1 } })
+  return data
+}
 
 export default function Products() {
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const { data: rows, loading, error, reload } = useRemoteData(loadProducts, [])
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [editing, setEditing] = useState<Any | null>(null)
-  const [form] = Form.useForm()
+  const [editing, setEditing] = useState<ProductRecord | null>(null)
+  const [form] = Form.useForm<ProductFormValues>()
 
-  const load = () => {
-    setLoading(true)
-    client.get('/products', { params: { all: 1 } }).then((r) => setRows(r.data)).finally(() => setLoading(false))
-  }
-  useEffect(load, [])
+  useEffect(() => {
+    if (error) message.error(getErrorMessage(error, '项目加载失败'))
+  }, [error])
 
-  const openForm = (rec?: Any) => {
+  const openForm = (rec?: ProductRecord) => {
     setEditing(rec || null)
     form.resetFields()
     if (rec) form.setFieldsValue({ ...rec, standardPrice: rec.standardPrice != null ? Number(rec.standardPrice) : undefined })
@@ -48,9 +71,9 @@ export default function Products() {
       else await client.post('/products', v)
       message.success('已保存')
       setOpen(false)
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+      reload()
+    } catch (e) {
+      message.error(getErrorMessage(e, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -59,16 +82,16 @@ export default function Products() {
     try {
       await client.delete(`/products/${id}`)
       message.success('已删除')
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+      reload()
+    } catch (e) {
+      message.error(getErrorMessage(e, '删除失败'))
     }
   }
 
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={() => openForm()}>新增项目</Button>
-      <Table
+      <Table<ProductRecord>
         {...scrollTableProps}
         rowKey="id"
         loading={loading}

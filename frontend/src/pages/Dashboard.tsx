@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Card, Col, Row, Segmented, Spin, Table, Tag } from 'antd'
+import { Card, Col, Row, Segmented, Spin, Table, Tag, message, type TableColumnsType } from 'antd'
 import client from '../api/client'
 import { CURRENCY_LABEL, CUSTOMER_STATUS_LABEL, CUSTOMER_STATUS_STYLE, fmtMoney } from '../api/types'
 import { moneyIn, moneyOut } from '../api/money'
 import { COL, smallTableProps } from '../components/tableLayout'
 import { sortChannelLeadStats } from '../utils/channelSort'
+import type { CurrencyOrderTotal, DashboardData, LeadCountRow, TrendPoint } from '../api/reportTypes'
+import { useRemoteData } from '../hooks/useRemoteData'
+import { getErrorMessage } from '../api/errors'
 
-type Any = Record<string, any>
-type TrendPoint = { date: string; label: string; leads: number; signed: number }
 type TrendRange = 15 | 30
+const loadDashboard = async () => (await client.get<DashboardData>('/reports/dashboard')).data
 
 function PageHead({ eyebrow, title }: { eyebrow: string; title: string }) {
   const today = new Date()
@@ -45,7 +47,7 @@ function Stat({ title, value, unit, color }: { title: string; value: ReactNode; 
   )
 }
 
-function MoneyByCurrency({ rows, fields }: { rows: Any[]; fields: [string, string, ('in' | 'out')?][] }) {
+function MoneyByCurrency({ rows, fields }: { rows: CurrencyOrderTotal[]; fields: [keyof CurrencyOrderTotal['_sum'], string, ('in' | 'out')?][] }) {
   return (
     <Table
       {...smallTableProps}
@@ -58,7 +60,7 @@ function MoneyByCurrency({ rows, fields }: { rows: Any[]; fields: [string, strin
           title,
           width: COL.money,
           align: 'right' as const,
-          render: (_: any, r: Any) => {
+          render: (_: unknown, r: CurrencyOrderTotal) => {
             const val = r._sum?.[key]
             return tone === 'in' ? moneyIn(val) : tone === 'out' ? moneyOut(val) : fmtMoney(val)
           },
@@ -68,21 +70,21 @@ function MoneyByCurrency({ rows, fields }: { rows: Any[]; fields: [string, strin
   )
 }
 
-function LeadCountTable({
+function LeadCountTable<T extends LeadCountRow>({
   rows,
   rowKey,
   nameTitle,
   extraColumns = [],
   showCustomerCount = true,
 }: {
-  rows: Any[]
-  rowKey: (r: Any) => string | number
+  rows: T[]
+  rowKey: (r: T) => string | number
   nameTitle: string
-  extraColumns?: Any[]
+  extraColumns?: TableColumnsType<T>
   showCustomerCount?: boolean
 }) {
   return (
-    <Table
+    <Table<T>
       {...smallTableProps}
       pagination={false}
       rowKey={rowKey}
@@ -228,12 +230,11 @@ function TrendChart({ rows }: { rows: TrendPoint[] }) {
 }
 
 export default function Dashboard() {
-  const [data, setData] = useState<Any | null>(null)
-  const [loading, setLoading] = useState(true)
+  const { data, loading, error } = useRemoteData<DashboardData | null>(loadDashboard, null)
   const [trendDays, setTrendDays] = useState<TrendRange>(30)
   useEffect(() => {
-    client.get('/reports/dashboard').then((r) => setData(r.data)).finally(() => setLoading(false))
-  }, [])
+    if (error) message.error(getErrorMessage(error, '仪表盘加载失败'))
+  }, [error])
   if (loading) return <Spin />
   if (!data) return null
 
@@ -353,7 +354,7 @@ export default function Dashboard() {
         </Card>
         <SectionTitle eyebrow="STATUS" title="登记线索按状态分布" />
         <Card size="small">
-          {(data.byStatus || []).map((s: Any) => (
+          {(data.byStatus || []).map((s) => (
             <Tag key={s.mainStatus} style={{ ...CUSTOMER_STATUS_STYLE[s.mainStatus], marginBottom: 8, fontSize: 14, padding: '2px 10px' }}>
               {CUSTOMER_STATUS_LABEL[s.mainStatus]}：{s._count}
             </Tag>
@@ -377,7 +378,7 @@ export default function Dashboard() {
               { title: '币种', dataIndex: 'currency', width: COL.currency, render: (c) => <b>{CURRENCY_LABEL[c]}</b> },
               { title: '状态', dataIndex: 'collectionStatus', width: COL.status, render: (s) => (s === 'COLLECTED' ? '已收款' : '待收款') },
               { title: '笔数', dataIndex: '_count', width: COL.count },
-              { title: '金额', width: COL.money, align: 'right', render: (_: any, r: Any) => fmtMoney(r._sum?.commissionAmount) },
+              { title: '金额', width: COL.money, align: 'right', render: (_, r) => fmtMoney(r._sum?.commissionAmount) },
             ]}
           />
         </Card>
@@ -395,7 +396,7 @@ export default function Dashboard() {
       </Row>
       <SectionTitle eyebrow="STATUS" title="按状态分布" />
       <Card size="small">
-        {(data.byStatus || []).map((s: Any) => (
+        {(data.byStatus || []).map((s) => (
           <Tag key={s.mainStatus} style={{ ...CUSTOMER_STATUS_STYLE[s.mainStatus], marginBottom: 8, fontSize: 14, padding: '2px 10px' }}>
             {CUSTOMER_STATUS_LABEL[s.mainStatus]}：{s._count}
           </Tag>

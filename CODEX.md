@@ -2,6 +2,13 @@
 
 本文件给另一台电脑上的 Codex 使用。开始改动前先读本文件，再读根目录 `CLAUDE.md`，最后按需要读相关源码文件。不要只靠搜索结果改文件；真正编辑前必须打开目标文件确认上下文。
 
+## Moka 当前仓库说明
+
+- 本地目录：`D:\AI\Moka-CRM`；`origin` 指向 `https://github.com/yangdyjp-glitch/Moka.crm`，日常修改推送至 `origin/main`。
+- `upstream` 为原 `ty.crm` 仓库，仅用于读取；推送地址已设为 `DISABLED`。只有用户明确提出时才可恢复推送。
+- 下文的 TY Railway 地址属于复制前的项目背景，不代表 Moka 已配置相同部署；不要据此操作 TY 服务。
+- 前端改动检查：`npm run lint`、`npm test`、`npm run build`；构建后的模拟页面检查运行 `node test/smoke.mjs`。详见 `frontend/test/README.md`。
+
 ## 项目定位
 
 这是一个教育/留学销售 Web 后台 CRM，用于客户线索、销售跟进、订单签约、收款、退款、渠道分成、转介绍收佣和后台报表。

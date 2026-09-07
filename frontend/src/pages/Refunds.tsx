@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
+  Alert,
   Button,
   Form,
   Input,
@@ -15,6 +16,9 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import client from '../api/client'
+import { getErrorMessage } from '../api/errors'
+import type { OrderListItem, PageResult, RefundCreateValues, RefundListItem } from '../api/financeTypes'
+import { useRemoteData } from '../hooks/useRemoteData'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps } from '../components/tableLayout'
 import { useAuth } from '../auth/AuthContext'
@@ -28,14 +32,13 @@ import {
 } from '../api/types'
 import { moneyOut } from '../api/money'
 
-type Any = Record<string, any>
 const EMPTY_FILTER = '__EMPTY__'
 
-function arrivalMonthValue(r: Any) {
+function arrivalMonthValue(r: RefundListItem) {
   return r.completedAt ? dayjs(r.completedAt).format('YYYY-MM') : EMPTY_FILTER
 }
 
-function monthFilters(rows: Any[]) {
+function monthFilters(rows: RefundListItem[]) {
   const values = Array.from(new Set(rows.map(arrivalMonthValue)))
   return values
     .sort((a, b) => {
@@ -50,24 +53,21 @@ export default function Refunds() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'ADMIN'
   const nav = useNavigate()
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const fetchRefunds = useCallback(async () => {
+    const { data } = await client.get<RefundListItem[]>('/refunds')
+    return data
+  }, [])
+  const { data: rows, loading, error, reload: load } = useRemoteData(fetchRefunds, [])
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [form] = Form.useForm()
-  const [orders, setOrders] = useState<Any[]>([])
-
-  const load = () => {
-    setLoading(true)
-    client.get('/refunds').then((r) => setRows(r.data)).finally(() => setLoading(false))
-  }
-  useEffect(load, [])
+  const [form] = Form.useForm<RefundCreateValues>()
+  const [orders, setOrders] = useState<OrderListItem[]>([])
 
   const openCreate = async () => {
     form.resetFields()
     form.setFieldsValue({ bearer: 'COMPANY', refundPercent: 100, appliedAt: todayDate() })
-    const o = await client.get('/orders', { params: { all: 1 } })
-    setOrders(o.data.items.filter((x: Any) => !['REFUNDED', 'CANCELLED'].includes(x.status)))
+    const o = await client.get<PageResult<OrderListItem>>('/orders', { params: { all: 1 } })
+    setOrders(o.data.items.filter((x) => !['REFUNDED', 'CANCELLED'].includes(x.status)))
     setOpen(true)
   }
 
@@ -86,8 +86,8 @@ export default function Refunds() {
       message.success('已提交退款申请（待管理员执行）')
       setOpen(false)
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+    } catch (e: unknown) {
+      message.error(getErrorMessage(e, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -104,8 +104,8 @@ export default function Refunds() {
       await client.delete(`/refunds/${id}`)
       message.success('已删除')
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+    } catch (e: unknown) {
+      message.error(getErrorMessage(e, '删除失败'))
     }
   }
 
@@ -114,7 +114,8 @@ export default function Refunds() {
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={openCreate}>发起退款</Button>
-      <Table
+      {!!error && <Alert type="error" showIcon message={getErrorMessage(error, '退款数据加载失败')} action={<Button size="small" onClick={load}>重新加载</Button>} style={{ marginBottom: 16 }} />}
+      <Table<RefundListItem>
         {...scrollTableProps}
         className="refunds-list-table full-height-list-table"
         rowKey="id"
@@ -122,13 +123,13 @@ export default function Refunds() {
         dataSource={rows}
         columns={[
           { title: '退款号', dataIndex: 'refundNo', width: COL.no },
-          { title: '登记时间', dataIndex: 'appliedAt', width: COL.date, render: (t: string, r: Any) => fmtDate(t ?? r.createdAt) },
+          { title: '登记时间', dataIndex: 'appliedAt', width: COL.date, render: (t: string, r) => fmtDate(t ?? r.createdAt) },
           {
             title: '到账时间',
             dataIndex: 'completedAt',
             width: COL.date,
             filters: arrivalMonthFilters,
-            onFilter: (value: any, r) => arrivalMonthValue(r) === value,
+            onFilter: (value, r) => arrivalMonthValue(r) === value,
             render: fmtDate,
           },
           { title: '客户', width: COL.person, render: (_, r) => <a onClick={() => nav(`/customers/${r.customer?.id}`)}>{r.customer?.name}</a> },

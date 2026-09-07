@@ -1,7 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Button, Card, Form, Input, InputNumber, Space, Table, Tag, message } from 'antd'
+import { Alert, Button, Card, Form, Input, InputNumber, Space, Table, Tag, message } from 'antd'
 import client from '../api/client'
+import { getErrorMessage } from '../api/errors'
+import type { Order, OrderDetails, OrderEditValues, Payment, Refund } from '../api/financeTypes'
+import { useRemoteData } from '../hooks/useRemoteData'
 import {
   CURRENCY_LABEL,
   ORDER_STATUS_LABEL,
@@ -13,13 +16,11 @@ import {
 import { moneyIn, moneyOut } from '../api/money'
 import { COL, smallTableProps } from '../components/tableLayout'
 
-type Any = Record<string, any>
-
-function orderQuantity(order: Any) {
+function orderQuantity(order: Order) {
   return Number(order.quantity) || 1
 }
 
-function orderUnitPrice(order: Any) {
+function orderUnitPrice(order: Order) {
   return order.unitPrice != null ? Number(order.unitPrice) : Number(order.originalPrice || 0) / orderQuantity(order)
 }
 
@@ -30,27 +31,28 @@ function calcOriginalPrice(unitPrice: unknown, quantity: unknown) {
 export default function OrderDetail() {
   const { id } = useParams()
   const nav = useNavigate()
-  const [o, setO] = useState<Any | null>(null)
+  const fetchOrder = useCallback(async () => {
+    const { data } = await client.get<OrderDetails>(`/orders/${id}`)
+    return data
+  }, [id])
+  const { data: o, error, reload: load } = useRemoteData<OrderDetails | null>(fetchOrder, null)
   const [saving, setSaving] = useState(false)
-  const [form] = Form.useForm()
+  const [form] = Form.useForm<OrderEditValues>()
   const unitPrice = Form.useWatch('unitPrice', form)
   const quantity = Form.useWatch('quantity', form)
   const currentOriginalPrice = calcOriginalPrice(unitPrice, quantity)
 
-  const load = () => {
-    client.get(`/orders/${id}`).then((r) => {
-      setO(r.data)
-      form.setFieldsValue({
-        unitPrice: orderUnitPrice(r.data),
-        quantity: orderQuantity(r.data),
-        discountAmount: Number(r.data.discountAmount),
-        contractNo: r.data.contractNo,
-        signedAt: fmtDate(r.data.signedAt),
-        remark: r.data.remark,
-      })
+  useEffect(() => {
+    if (!o) return
+    form.setFieldsValue({
+      unitPrice: orderUnitPrice(o),
+      quantity: orderQuantity(o),
+      discountAmount: Number(o.discountAmount),
+      contractNo: o.contractNo,
+      signedAt: fmtDate(o.signedAt),
+      remark: o.remark,
     })
-  }
-  useEffect(load, [id])
+  }, [form, o])
 
   const save = async () => {
     const v = await form.validateFields()
@@ -63,17 +65,19 @@ export default function OrderDetail() {
       })
       message.success('已保存')
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '保存失败')
+    } catch (e: unknown) {
+      message.error(getErrorMessage(e, '保存失败'))
     } finally {
       setSaving(false)
     }
   }
 
-  if (!o) return null
+  const errorAlert = error ? <Alert type="error" showIcon message={getErrorMessage(error, '订单详情加载失败')} action={<Button size="small" onClick={load}>重新加载</Button>} style={{ marginBottom: 16 }} /> : null
+  if (!o) return errorAlert
 
   return (
     <div>
+      {errorAlert}
       <Button onClick={() => nav('/orders')} style={{ marginBottom: 12 }}>
         ← 返回订单列表
       </Button>
@@ -131,7 +135,7 @@ export default function OrderDetail() {
       </Card>
 
       <Card title="收款记录" size="small" style={{ marginBottom: 16 }}>
-        <Table
+        <Table<Payment>
           {...smallTableProps}
           rowKey="id"
           pagination={false}
@@ -139,7 +143,7 @@ export default function OrderDetail() {
           columns={[
             { title: '收款号', dataIndex: 'paymentNo', width: COL.no },
             { title: '登记时间', dataIndex: 'createdAt', width: COL.date, render: fmtDate },
-            { title: '到账时间', dataIndex: 'confirmedAt', width: COL.date, render: (t: string, r: Any) => (r.confirmStatus === 'CONFIRMED' ? fmtDate(t) : '—') },
+            { title: '到账时间', dataIndex: 'confirmedAt', width: COL.date, render: (t: string | null, r) => (r.confirmStatus === 'CONFIRMED' ? fmtDate(t) : '—') },
             { title: '金额', dataIndex: 'amount', width: COL.money, render: moneyIn, align: 'right' },
             { title: '状态', dataIndex: 'confirmStatus', width: COL.status, render: (s: string) => PAYMENT_CONFIRM_LABEL[s] },
             { title: '备注', dataIndex: 'remark', width: COL.note },
@@ -148,14 +152,14 @@ export default function OrderDetail() {
       </Card>
 
       <Card title="退款记录" size="small">
-        <Table
+        <Table<Refund>
           {...smallTableProps}
           rowKey="id"
           pagination={false}
           dataSource={o.refunds || []}
           columns={[
             { title: '退款号', dataIndex: 'refundNo', width: COL.no },
-            { title: '登记时间', dataIndex: 'appliedAt', width: COL.date, render: (t: string, r: Any) => fmtDate(t ?? r.createdAt) },
+            { title: '登记时间', dataIndex: 'appliedAt', width: COL.date, render: (t: string, r) => fmtDate(t ?? r.createdAt) },
             { title: '到账时间', dataIndex: 'completedAt', width: COL.date, render: fmtDate },
             { title: '名义额', dataIndex: 'nominalAmount', width: COL.money, render: moneyOut, align: 'right' },
             { title: '状态', dataIndex: 'status', width: COL.status, render: (s: string) => REFUND_STATUS_LABEL[s] },

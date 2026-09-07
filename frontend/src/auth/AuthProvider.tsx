@@ -1,29 +1,8 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import client from '../api/client';
+import { AuthContext, type AuthUser } from './AuthContext';
 
-export interface AuthUser {
-  id: number;
-  username: string;
-  name: string;
-  role: string;
-  impersonator?: {
-    id: number;
-    username: string;
-    name: string;
-    role: string;
-  } | null;
-}
-
-interface Ctx {
-  user: AuthUser | null;
-  login: (username: string, password: string) => Promise<void>;
-  impersonate: (userId: number) => Promise<void>;
-  stopImpersonating: () => Promise<void>;
-  logout: () => void;
-}
-
-const AuthContext = createContext<Ctx>(null!);
-export const useAuth = () => useContext(AuthContext);
+interface AuthSession { token: string; user: AuthUser }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(() => {
@@ -38,17 +17,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const login = async (username: string, password: string) => {
-    const { data } = await client.post('/auth/login', { username, password });
+    const { data } = await client.post<AuthSession>('/auth/login', { username, password });
     setSession(data.token, data.user);
   };
 
   const impersonate = async (userId: number) => {
-    const { data } = await client.post('/auth/impersonate', { userId });
+    const { data } = await client.post<AuthSession>('/auth/impersonate', { userId });
     setSession(data.token, data.user);
   };
 
   const stopImpersonating = async () => {
-    const { data } = await client.post('/auth/stop-impersonating');
+    const { data } = await client.post<AuthSession>('/auth/stop-impersonating');
     setSession(data.token, data.user);
   };
 

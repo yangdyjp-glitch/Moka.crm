@@ -1,30 +1,48 @@
 import { useEffect, useState } from 'react'
 import { Button, Form, Input, Modal, Select, Space, Table, Tag, message } from 'antd'
 import client from '../api/client'
+import { getErrorMessage } from '../api/errors'
 import { ROLE_LABEL } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, pageTableProps } from '../components/tableLayout'
+import { useRemoteData } from '../hooks/useRemoteData'
 
-type Any = Record<string, any>
+interface UserRecord {
+  id: number
+  username: string
+  name: string
+  role: 'ADMIN' | 'MARKET' | 'SALES' | 'BUSINESS_SUPERVISOR' | 'DOWNSTREAM_SALES'
+  status: string
+}
+
+interface UserFormValues {
+  username?: string
+  name: string
+  password?: string
+  role: UserRecord['role']
+  status?: string
+}
+
+const loadUsers = async () => {
+  const { data } = await client.get<UserRecord[]>('/users')
+  return data
+}
 
 export default function Users() {
   const { user, impersonate } = useAuth()
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
+  const { data: rows, loading, error, reload } = useRemoteData(loadUsers, [])
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [impersonatingId, setImpersonatingId] = useState<number | null>(null)
-  const [editing, setEditing] = useState<Any | null>(null)
-  const [form] = Form.useForm()
+  const [editing, setEditing] = useState<UserRecord | null>(null)
+  const [form] = Form.useForm<UserFormValues>()
 
-  const load = () => {
-    setLoading(true)
-    client.get('/users').then((r) => setRows(r.data)).finally(() => setLoading(false))
-  }
-  useEffect(load, [])
+  useEffect(() => {
+    if (error) message.error(getErrorMessage(error, '用户加载失败'))
+  }, [error])
 
-  const openForm = (rec?: Any) => {
+  const openForm = (rec?: UserRecord) => {
     setEditing(rec || null)
     form.resetFields()
     if (rec) form.setFieldsValue(rec)
@@ -38,9 +56,9 @@ export default function Users() {
       else await client.post('/users', v)
       message.success('已保存')
       setOpen(false)
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+      reload()
+    } catch (e) {
+      message.error(getErrorMessage(e, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -49,12 +67,12 @@ export default function Users() {
     try {
       await client.delete(`/users/${id}`)
       message.success('已删除')
-      load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+      reload()
+    } catch (e) {
+      message.error(getErrorMessage(e, '删除失败'))
     }
   }
-  const doImpersonate = (r: Any) => {
+  const doImpersonate = (r: UserRecord) => {
     Modal.confirm({
       title: `登录该账户：${r.name}`,
       content: (
@@ -71,8 +89,8 @@ export default function Users() {
         try {
           await impersonate(r.id)
           window.location.assign('/')
-        } catch (e: any) {
-          message.error(e.response?.data?.message || '代理登录失败')
+        } catch (e) {
+          message.error(getErrorMessage(e, '代理登录失败'))
           setImpersonatingId(null)
         }
       },
@@ -82,13 +100,13 @@ export default function Users() {
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={() => openForm()}>新增用户</Button>
-      <Table
+      <Table<UserRecord>
         {...pageTableProps}
         rowKey="id"
         loading={loading}
         dataSource={rows}
         columns={[
-          { title: '用户编号', width: COL.no, render: (_: any, r: Any) => 'YH' + String(r.id).padStart(6, '0') },
+          { title: '用户编号', width: COL.no, render: (_, r) => 'YH' + String(r.id).padStart(6, '0') },
           { title: '账号', dataIndex: 'username', width: COL.name },
           { title: '姓名', dataIndex: 'name', width: COL.person },
           { title: '角色', dataIndex: 'role', width: COL.status, render: (r) => <Tag color="blue">{ROLE_LABEL[r]}</Tag> },

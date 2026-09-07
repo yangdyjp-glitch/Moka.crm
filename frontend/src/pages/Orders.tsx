@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
+  Alert,
   Button,
   Form,
   Input,
@@ -12,16 +13,21 @@ import {
   Tag,
   message,
 } from 'antd'
+import type { TableColumnsType } from 'antd'
+import { isAxiosError } from 'axios'
 import dayjs from 'dayjs'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps } from '../components/tableLayout'
 import client from '../api/client'
+import { getErrorMessage } from '../api/errors'
+import type { CustomerOption, OrderCreateValues, OrderListItem, PageResult } from '../api/financeTypes'
+import type { ProductOption } from '../api/models'
+import { useRemoteData } from '../hooks/useRemoteData'
 import { useAuth } from '../auth/AuthContext'
 import { loadProducts } from '../api/options'
 import { CURRENCY_LABEL, ORDER_STATUS_LABEL, fmtDate, fmtMoney, todayDate } from '../api/types'
 import { moneyIn } from '../api/money'
 
-type Any = Record<string, any>
 const EMPTY_FILTER = '__EMPTY__'
 const ORDER_STATUS_COLOR: Record<string, string> = {
   PENDING_PAYMENT: 'orange',
@@ -53,7 +59,7 @@ function filterText(v: unknown) {
   return v == null || v === '' ? '—' : String(v)
 }
 
-function uniqueFilters(rows: Any[], getValue: (row: Any) => unknown, getText: (row: Any) => unknown = getValue) {
+function uniqueFilters<T>(rows: T[], getValue: (row: T) => unknown, getText: (row: T) => unknown = getValue) {
   const seen = new Map<string, string>()
   rows.forEach((row) => {
     const value = filterValue(getValue(row))
@@ -64,11 +70,11 @@ function uniqueFilters(rows: Any[], getValue: (row: Any) => unknown, getText: (r
     .map(([value, text]) => ({ value, text }))
 }
 
-function signedMonthValue(r: Any) {
+function signedMonthValue(r: OrderListItem) {
   return r.signedAt ? dayjs(r.signedAt).format('YYYY-MM') : EMPTY_FILTER
 }
 
-function monthFilters(rows: Any[]) {
+function monthFilters(rows: OrderListItem[]) {
   const values = Array.from(new Set(rows.map(signedMonthValue)))
   return values
     .sort((a, b) => {
@@ -79,11 +85,11 @@ function monthFilters(rows: Any[]) {
     .map((value) => ({ value, text: value === EMPTY_FILTER ? '未填写' : value }))
 }
 
-function orderQuantity(r: Any) {
+function orderQuantity(r: OrderListItem) {
   return Number(r.quantity) || 1
 }
 
-function orderUnitPrice(r: Any) {
+function orderUnitPrice(r: OrderListItem) {
   return r.unitPrice != null ? Number(r.unitPrice) : Number(r.originalPrice || 0) / orderQuantity(r)
 }
 
@@ -95,13 +101,16 @@ export default function Orders() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'ADMIN'
   const nav = useNavigate()
-  const [data, setData] = useState<{ items: Any[]; total: number }>({ items: [], total: 0 })
-  const [loading, setLoading] = useState(false)
+  const fetchOrders = useCallback(async () => {
+    const { data } = await client.get<PageResult<OrderListItem>>('/orders', { params: { all: 1 } })
+    return data
+  }, [])
+  const { data, loading, error, reload: load } = useRemoteData(fetchOrders, { items: [], total: 0 })
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [form] = Form.useForm()
-  const [customers, setCustomers] = useState<Any[]>([])
-  const [products, setProducts] = useState<Any[]>([])
+  const [form] = Form.useForm<OrderCreateValues>()
+  const [customers, setCustomers] = useState<CustomerOption[]>([])
+  const [products, setProducts] = useState<ProductOption[]>([])
   const fp = Form.useWatch('firstPaymentAmount', form)
   const tp = Form.useWatch('tailPaymentAmount', form)
   const up = Form.useWatch('unitPrice', form)
@@ -112,16 +121,10 @@ export default function Orders() {
   const paySum = (Number(fp) || 0) + (Number(tp) || 0)
   const payMismatch = originalPrice > 0 && paySum !== receivable
 
-  const load = () => {
-    setLoading(true)
-    client.get('/orders', { params: { all: 1 } }).then((r) => setData(r.data)).finally(() => setLoading(false))
-  }
-  useEffect(load, [])
-
   const openCreate = async () => {
     form.resetFields()
     form.setFieldsValue({ currency: 'JPY', quantity: 1, signedAt: todayDate(), firstPaymentPaidAt: todayDate() })
-    const cs = await client.get('/customers', { params: { all: 1 } })
+    const cs = await client.get<PageResult<CustomerOption>>('/customers', { params: { all: 1 } })
     setCustomers(cs.data.items)
     setProducts(await loadProducts().catch(() => []))
     setOpen(true)
@@ -148,8 +151,8 @@ export default function Orders() {
       message.success('已创建订单')
       setOpen(false)
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '创建失败')
+    } catch (e: unknown) {
+      message.error(getErrorMessage(e, '创建失败'))
     } finally {
       setSubmitting(false)
     }
@@ -166,21 +169,25 @@ export default function Orders() {
       await client.delete(`/orders/${id}`)
       message.success('已删除订单')
       load()
-    } catch (e: any) {
-      const d = e.response?.data
-      if (d?.blockingPayments?.length || d?.blockingRefunds?.length) {
+    } catch (e: unknown) {
+      const details = isAxiosError<unknown>(e) ? e.response?.data : undefined
+      const blockingPayments = details && typeof details === 'object' && 'blockingPayments' in details && Array.isArray(details.blockingPayments)
+        ? details.blockingPayments.filter((value): value is string => typeof value === 'string') : []
+      const blockingRefunds = details && typeof details === 'object' && 'blockingRefunds' in details && Array.isArray(details.blockingRefunds)
+        ? details.blockingRefunds.filter((value): value is string => typeof value === 'string') : []
+      if (blockingPayments.length || blockingRefunds.length) {
         Modal.error({
           title: '无法删除订单',
           content: (
             <div>
-              <p>{d.message}</p>
-              {d.blockingPayments?.length > 0 && <p>已到账收款：{d.blockingPayments.join('、')}</p>}
-              {d.blockingRefunds?.length > 0 && <p>已退款：{d.blockingRefunds.join('、')}</p>}
+              <p>{getErrorMessage(e, '删除失败')}</p>
+              {blockingPayments.length > 0 && <p>已到账收款：{blockingPayments.join('、')}</p>}
+              {blockingRefunds.length > 0 && <p>已退款：{blockingRefunds.join('、')}</p>}
             </div>
           ),
         })
       } else {
-        message.error(d?.message || '删除失败')
+        message.error(getErrorMessage(e, '删除失败'))
       }
     }
   }
@@ -203,43 +210,43 @@ export default function Orders() {
     [data.items],
   )
 
-  const columns = [
-    { title: '订单号', dataIndex: 'orderNo', width: ORDER_COL.no, render: (n: string, r: Any) => <a onClick={() => nav(`/orders/${r.id}`)}>{n}</a> },
+  const columns: TableColumnsType<OrderListItem> = [
+    { title: '订单号', dataIndex: 'orderNo', width: ORDER_COL.no, render: (n: string, r) => <a onClick={() => nav(`/orders/${r.id}`)}>{n}</a> },
     {
       title: '时间',
       dataIndex: 'signedAt',
       width: ORDER_COL.date,
       filters: signedMonthFilters,
-      onFilter: (value: any, r: Any) => signedMonthValue(r) === value,
+      onFilter: (value, r) => signedMonthValue(r) === value,
       render: fmtDate,
     },
-    { title: '客户', width: ORDER_COL.person, render: (_: any, r: Any) => <a onClick={() => nav(`/customers/${r.customer?.id}`)}>{r.customer?.name}</a> },
+    { title: '客户', width: ORDER_COL.person, render: (_, r) => <a onClick={() => nav(`/customers/${r.customer?.id}`)}>{r.customer?.name}</a> },
     {
       title: '销售人员',
       width: ORDER_COL.sales,
       filters: salesFilters,
       filterSearch: true,
-      onFilter: (value: any, r: Any) => filterValue(r.customer?.ownerUserId) === value,
-      render: (_: any, r: Any) => r.salesPerson?.name || '—',
+      onFilter: (value, r) => filterValue(r.customer?.ownerUserId) === value,
+      render: (_, r) => r.salesPerson?.name || '—',
     },
     {
       title: '项目',
       width: ORDER_COL.project,
       filters: productFilters,
       filterSearch: true,
-      onFilter: (value: any, r: Any) => filterValue(r.product?.id) === value,
-      render: (_: any, r: Any) => r.product?.name,
+      onFilter: (value, r) => filterValue(r.product?.id) === value,
+      render: (_, r) => r.product?.name,
     },
     {
       title: '币种',
       dataIndex: 'currency',
       width: ORDER_COL.currency,
       filters: currencyFilters,
-      onFilter: (value: any, r: Any) => filterValue(r.currency) === value,
+      onFilter: (value, r) => filterValue(r.currency) === value,
       render: (c: string) => CURRENCY_LABEL[c],
     },
-    { title: '单价', dataIndex: 'unitPrice', width: ORDER_COL.money, render: (_: any, r: Any) => fmtMoney(orderUnitPrice(r)), align: 'right' as const },
-    { title: '数量', dataIndex: 'quantity', width: ORDER_COL.quantity, render: (_: any, r: Any) => orderQuantity(r), align: 'right' as const },
+    { title: '单价', dataIndex: 'unitPrice', width: ORDER_COL.money, render: (_, r) => fmtMoney(orderUnitPrice(r)), align: 'right' },
+    { title: '数量', dataIndex: 'quantity', width: ORDER_COL.quantity, render: (_, r) => orderQuantity(r), align: 'right' },
     { title: '优惠', dataIndex: 'discountAmount', width: ORDER_COL.money, render: fmtMoney, align: 'right' as const },
     { title: '应收', dataIndex: 'receivableAmount', width: ORDER_COL.money, render: fmtMoney, align: 'right' as const },
     { title: '已收', dataIndex: 'paidAmount', width: ORDER_COL.money, render: moneyIn, align: 'right' as const },
@@ -249,13 +256,13 @@ export default function Orders() {
       dataIndex: 'status',
       width: ORDER_COL.status,
       filters: statusFilters,
-      onFilter: (value: any, r: Any) => filterValue(r.status) === value,
+      onFilter: (value, r) => filterValue(r.status) === value,
       render: (s: string) => <Tag color={ORDER_STATUS_COLOR[s]}>{ORDER_STATUS_LABEL[s]}</Tag>,
     },
     {
       title: '操作',
       width: ORDER_COL.action,
-      render: (_: any, r: Any) => (
+      render: (_, r) => (
         <Space wrap>
           <ActionBtn tone="view" onClick={() => nav(`/orders/${r.id}`)}>详情</ActionBtn>
           {['FULLY_PAID', 'PARTIAL_PAID', 'PENDING_PAYMENT'].includes(r.status) && (
@@ -275,7 +282,8 @@ export default function Orders() {
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={openCreate}>签约（新建订单）</Button>
-      <Table
+      {!!error && <Alert type="error" showIcon message={getErrorMessage(error, '订单数据加载失败')} action={<Button size="small" onClick={load}>重新加载</Button>} style={{ marginBottom: 16 }} />}
+      <Table<OrderListItem>
         {...scrollTableProps}
         className="orders-list-table"
         rowKey="id"

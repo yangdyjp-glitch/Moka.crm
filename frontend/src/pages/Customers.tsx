@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useMemo, useState, type CSSProperties } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
+  Alert,
   Button,
   Form,
   Input,
@@ -12,10 +13,16 @@ import {
   Upload,
   message,
 } from 'antd'
+import type { TableColumnsType } from 'antd'
+import { isAxiosError } from 'axios'
 import { UploadOutlined } from '@ant-design/icons'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps } from '../components/tableLayout'
 import client, { downloadFile } from '../api/client'
+import { getErrorMessage } from '../api/errors'
+import type { AcquisitionChannelOption, ChannelOption, UserOption } from '../api/models'
+import type { CustomerFormValues, CustomerListItem, CustomerListResponse, CustomerUpdate } from '../api/customerTypes'
+import { useRemoteData } from '../hooks/useRemoteData'
 import { useAuth } from '../auth/AuthContext'
 import {
   loadAcqChannels,
@@ -31,7 +38,6 @@ import {
   todayDate,
 } from '../api/types'
 
-type Any = Record<string, any>
 const UNASSIGNED_FILTER = '__UNASSIGNED__'
 const customerStatusCssVars = (status: string) => {
   const style = CUSTOMER_STATUS_STYLE[status]
@@ -48,12 +54,12 @@ const customerStatusOptions = Object.entries(CUSTOMER_STATUS_LABEL).map(([value,
   label: <span className="customer-status-option" style={customerStatusCssVars(value)}>{label}</span>,
 }))
 
-function sourceChannelLabel(r: Any) {
+function sourceChannelLabel(r: CustomerListItem) {
   const channelName = r.channel?.name || r.acquisitionChannel?.name
   return `${SOURCE_LABEL[r.sourceCategory] || ''}${channelName ? '：' + channelName : ''}` || '—'
 }
 
-function uniqueFilters(rows: Any[], getLabel: (row: Any) => string, getValue: (row: Any) => string = getLabel) {
+function uniqueFilters(rows: CustomerListItem[], getLabel: (row: CustomerListItem) => string, getValue: (row: CustomerListItem) => string = getLabel) {
   const seen = new Map<string, string>()
   rows.forEach((row) => {
     const label = getLabel(row) || '—'
@@ -68,33 +74,28 @@ function uniqueFilters(rows: Any[], getLabel: (row: Any) => string, getValue: (r
 export default function Customers() {
   const { user } = useAuth()
   const nav = useNavigate()
-  const [data, setData] = useState<{ items: Any[]; total: number }>({ items: [], total: 0 })
-  const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [assignTarget, setAssignTarget] = useState<Any | null>(null)
-  const [form] = Form.useForm()
+  const [assignTarget, setAssignTarget] = useState<CustomerListItem | null>(null)
+  const [form] = Form.useForm<CustomerFormValues>()
   const [sourceCat, setSourceCat] = useState('SELF')
-  const [channels, setChannels] = useState<Any[]>([])
-  const [acq, setAcq] = useState<Any[]>([])
-  const [sales, setSales] = useState<Any[]>([])
-  const [editCust, setEditCust] = useState<Any | null>(null)
-  const [editForm] = Form.useForm()
+  const [channels, setChannels] = useState<ChannelOption[]>([])
+  const [acq, setAcq] = useState<AcquisitionChannelOption[]>([])
+  const [sales, setSales] = useState<UserOption[]>([])
+  const [editCust, setEditCust] = useState<CustomerListItem | null>(null)
+  const [editForm] = Form.useForm<CustomerFormValues>()
   const [editSourceCat, setEditSourceCat] = useState('SELF')
   const [inlineUpdatingId, setInlineUpdatingId] = useState<number | null>(null)
 
   const canCreate = user?.role === 'MARKET' || user?.role === 'BUSINESS_SUPERVISOR' || user?.role === 'ADMIN'
   const canEditCustomerName = user?.role === 'BUSINESS_SUPERVISOR' || user?.role === 'ADMIN'
 
-  const load = () => {
-    setLoading(true)
-    client
-      .get('/customers', { params: { all: 1, search: search || undefined } })
-      .then((r) => setData(r.data))
-      .finally(() => setLoading(false))
-  }
-  useEffect(load, [search])
+  const loadCustomers = useCallback(async () => {
+    const { data } = await client.get<CustomerListResponse>('/customers', { params: { all: 1, search: search || undefined } })
+    return data
+  }, [search])
+  const { data, loading, error, reload: load } = useRemoteData(loadCustomers, { items: [], total: 0 })
 
   const openCreate = async () => {
     form.resetFields()
@@ -114,17 +115,17 @@ export default function Customers() {
       message.success('已创建')
       setModalOpen(false)
       load()
-    } catch (e: any) {
-      if (e.response?.status === 409) {
+    } catch (e) {
+      if (isAxiosError<{ duplicates?: { name: string }[] }>(e) && e.response?.status === 409) {
         const dups = e.response.data?.duplicates || []
         Modal.confirm({
           title: '疑似重复客户',
-          content: `已存在 ${dups.length} 个匹配（${dups.map((d: Any) => d.name).join('、')}），仍要创建吗？`,
+          content: `已存在 ${dups.length} 个匹配（${dups.map((d) => d.name).join('、')}），仍要创建吗？`,
           okText: '仍然创建',
           onOk: () => submitCreate(true),
         })
       } else {
-        message.error(e.response?.data?.message || '创建失败')
+        message.error(getErrorMessage(e, '创建失败'))
       }
     } finally {
       setSubmitting(false)
@@ -143,12 +144,12 @@ export default function Customers() {
       await client.delete(`/customers/${id}`)
       message.success('已删除')
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+    } catch (e) {
+      message.error(getErrorMessage(e, '删除失败'))
     }
   }
 
-  const openQuickEdit = async (r: Any) => {
+  const openQuickEdit = async (r: CustomerListItem) => {
     setChannels(await loadChannelOptions().catch(() => []))
     setAcq(await loadAcqChannels().catch(() => []))
     setEditSourceCat(r.sourceCategory)
@@ -167,7 +168,7 @@ export default function Customers() {
     const v = await editForm.validateFields()
     setSubmitting(true)
     try {
-      const payload: Any = {
+      const payload: CustomerUpdate = {
         intentionLevel: v.intentionLevel ?? null,
         mainStatus: v.mainStatus,
         sourceCategory: v.sourceCategory,
@@ -182,21 +183,21 @@ export default function Customers() {
       message.success('已修改')
       setEditCust(null)
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+    } catch (e) {
+      message.error(getErrorMessage(e, '操作失败'))
     } finally {
       setSubmitting(false)
     }
   }
 
-  const updateInline = async (id: number, payload: Any) => {
+  const updateInline = async (id: number, payload: CustomerUpdate) => {
     setInlineUpdatingId(id)
     try {
       await client.patch(`/customers/${id}`, payload)
       message.success('已修改')
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+    } catch (e) {
+      message.error(getErrorMessage(e, '操作失败'))
     } finally {
       setInlineUpdatingId(null)
     }
@@ -232,17 +233,17 @@ export default function Customers() {
     [statusCounts],
   )
 
-  const columns = [
+  const columns: TableColumnsType<CustomerListItem> = [
     { title: '编号', dataIndex: 'customerNo', width: COL.no },
-    { title: '时间', dataIndex: 'discoveredAt', width: COL.date, render: (t: string, r: Any) => fmtDate(t ?? r.createdAt) },
-    { title: '姓名', dataIndex: 'name', width: COL.person, render: (n: string, r: Any) => <a onClick={() => nav(`/customers/${r.id}`)}>{n}</a> },
+    { title: '时间', dataIndex: 'discoveredAt', width: COL.date, render: (t: string | null, r) => fmtDate(t ?? r.createdAt) },
+    { title: '姓名', dataIndex: 'name', width: COL.person, render: (n: string, r) => <a onClick={() => nav(`/customers/${r.id}`)}>{n}</a> },
     {
       title: '来源 / 渠道',
       width: COL.source,
       filters: sourceFilters,
       filterSearch: true,
-      onFilter: (value: any, r: Any) => sourceChannelLabel(r) === value,
-      render: (_: any, r: Any) => (
+      onFilter: (value, r) => sourceChannelLabel(r) === value,
+      render: (_, r) => (
         <a onClick={() => openQuickEdit(r)}>
           {sourceChannelLabel(r)}
         </a>
@@ -253,8 +254,8 @@ export default function Customers() {
       dataIndex: 'mainStatus',
       width: COL.status,
       filters: statusFilters,
-      onFilter: (value: any, r: Any) => r.mainStatus === value,
-      render: (s: string, r: Any) => (
+      onFilter: (value, r) => r.mainStatus === value,
+      render: (s: string, r) => (
         <Select
           className="customer-inline-select customer-status-select"
           size="small"
@@ -275,8 +276,8 @@ export default function Customers() {
         ...Object.entries(INTENTION_LABEL).map(([value, label]) => ({ text: label, value })),
         { text: '未填写', value: '__EMPTY__' },
       ],
-      onFilter: (value: any, r: Any) => (value === '__EMPTY__' ? !r.intentionLevel : r.intentionLevel === value),
-      render: (i: string, r: Any) => (
+      onFilter: (value, r) => (value === '__EMPTY__' ? !r.intentionLevel : r.intentionLevel === value),
+      render: (i: string | null, r) => (
         <Select
           className="customer-inline-select"
           allowClear
@@ -296,8 +297,8 @@ export default function Customers() {
       width: COL.status,
       filters: ownerFilters,
       filterSearch: true,
-      onFilter: (value: any, r: Any) => (r.ownerUserId ? String(r.ownerUserId) : UNASSIGNED_FILTER) === value,
-      render: (_: any, r: Any) => {
+      onFilter: (value, r) => (r.ownerUserId ? String(r.ownerUserId) : UNASSIGNED_FILTER) === value,
+      render: (_, r) => {
         const label = r.ownerName ? <Tag color="green">{r.ownerName}</Tag> : <Tag>未分配</Tag>
         return canCreate ? (
           <a onClick={async () => { setSales(await loadUserOptions('SALES').catch(() => [])); setAssignTarget(r) }}>{label}</a>
@@ -309,7 +310,7 @@ export default function Customers() {
     {
       title: '操作',
       width: COL.action,
-      render: (_: any, r: Any) => (
+      render: (_, r) => (
         <Space wrap>
           <ActionBtn tone="view" onClick={() => nav(`/customers/${r.id}`)}>详情</ActionBtn>
           {canEditCustomerName && <ActionBtn tone="edit" onClick={() => openQuickEdit(r)}>修改</ActionBtn>}
@@ -330,8 +331,9 @@ export default function Customers() {
             showUploadList={false}
             customRequest={async ({ file }) => {
               const fd = new FormData()
-              fd.append('file', file as File)
-              const { data } = await client.post('/customers/import', fd)
+              if (!(file instanceof Blob)) throw new Error('请选择有效文件')
+              fd.append('file', file)
+              const { data } = await client.post<{ success: number; duplicates: number; failed: number }>('/customers/import', fd)
               message.success(`导入：成功${data.success}，重复${data.duplicates}，失败${data.failed}`)
               load()
             }}
@@ -342,12 +344,13 @@ export default function Customers() {
         <Button onClick={() => downloadFile('/customers/export', '客户.xlsx')}>导出</Button>
       </Space>
 
-      <Table
+      {!!error && <Alert type="error" showIcon message={getErrorMessage(error, '客户数据加载失败')} action={<Button size="small" onClick={load}>重新加载</Button>} style={{ marginBottom: 16 }} />}
+      <Table<CustomerListItem>
         {...scrollTableProps}
         className="customer-list-table"
         rowKey="id"
         loading={loading}
-        columns={columns as any}
+        columns={columns}
         dataSource={data.items}
       />
 

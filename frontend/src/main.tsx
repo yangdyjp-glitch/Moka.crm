@@ -6,7 +6,7 @@ import zhCN from 'antd/locale/zh_CN'
 import 'antd/dist/reset.css'
 import './index.css'
 import App from './App'
-import { AuthProvider } from './auth/AuthContext'
+import { AuthProvider } from './auth/AuthProvider'
 
 const FONT = "'NumTNR', var(--font-serif)"
 

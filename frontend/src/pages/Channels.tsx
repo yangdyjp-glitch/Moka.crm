@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -14,6 +14,9 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import client from '../api/client'
+import { getErrorMessage } from '../api/errors'
+import type { AcquisitionChannelOption, ChannelOption } from '../api/models'
+import { useRemoteData } from '../hooks/useRemoteData'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps, smallTableProps } from '../components/tableLayout'
 import { useAuth } from '../auth/AuthContext'
@@ -26,44 +29,61 @@ import {
   SETTLEMENT_COND_LABEL,
 } from '../api/types'
 
-type Any = Record<string, any>
+interface ChannelRecord extends ChannelOption {
+  contactName: string | null
+  contactInfo: string | null
+}
+
+type ChannelFormValues = Omit<ChannelRecord, 'id' | 'channelNo' | 'defaultCommissionRate' | 'defaultCommissionAmount'> & {
+  defaultCommissionRate?: number
+  defaultCommissionAmount?: number
+}
+
+interface LedgerEntry {
+  id: number
+  createdAt: string
+  currency: 'CNY' | 'JPY'
+  entryType: string
+  amount: string | number
+  balanceAfter: string | number
+  note: string | null
+}
+
+interface ChannelLedger {
+  entries: LedgerEntry[]
+  balances: { CNY: number; JPY: number }
+}
 
 export default function Channels() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'ADMIN'
-  const [rows, setRows] = useState<Any[]>([])
-  const [loading, setLoading] = useState(false)
-  const [loadError, setLoadError] = useState('')
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [editing, setEditing] = useState<Any | null>(null)
-  const [form] = Form.useForm()
-  const [ledger, setLedger] = useState<Any | null>(null)
-  const [acqRows, setAcqRows] = useState<Any[]>([])
+  const [editing, setEditing] = useState<ChannelRecord | null>(null)
+  const [form] = Form.useForm<ChannelFormValues>()
+  const [ledger, setLedger] = useState<ChannelLedger | null>(null)
   const [acqOpen, setAcqOpen] = useState(false)
-  const [acqEditing, setAcqEditing] = useState<Any | null>(null)
-  const [acqForm] = Form.useForm()
+  const [acqEditing, setAcqEditing] = useState<AcquisitionChannelOption | null>(null)
+  const [acqForm] = Form.useForm<{ name: string }>()
   const commissionMethod = Form.useWatch('commissionMethod', form)
+
+  const loadChannels = useCallback(async () => {
+    const { data } = await client.get<ChannelRecord[]>('/channels', { noCache: true })
+    return data
+  }, [])
+  const { data: rows, loading, error: loadError, reload: load } = useRemoteData(loadChannels, [])
+  const loadAcquisitionChannels = useCallback(async () => {
+    const { data } = await client.get<AcquisitionChannelOption[]>('/acquisition-channels/all', { noCache: true })
+    return data
+  }, [])
+  const { data: acqRows, error: acqError, reload: loadAcq } = useRemoteData(loadAcquisitionChannels, [])
   const sortedRows = useMemo(() => sortByChannelNameKeyword(rows), [rows])
   const openLedger = async (id: number) => {
-    const { data } = await client.get(`/channels/${id}/ledger`)
+    const { data } = await client.get<ChannelLedger>(`/channels/${id}/ledger`)
     setLedger(data)
   }
 
-  const load = () => {
-    setLoading(true)
-    setLoadError('')
-    client.get('/channels', { noCache: true } as any)
-      .then((r) => setRows(r.data))
-      .catch((e) => setLoadError(e.response?.data?.message || '渠道数据加载失败，请检查后端或数据库连接'))
-      .finally(() => setLoading(false))
-  }
-  const loadAcq = () => {
-    client.get('/acquisition-channels/all', { noCache: true } as any).then((r) => setAcqRows(r.data))
-  }
-  useEffect(() => { load(); loadAcq() }, [])
-
-  const openForm = (rec?: Any) => {
+  const openForm = (rec?: ChannelRecord) => {
     setEditing(rec || null)
     form.resetFields()
     if (rec) form.setFieldsValue({
@@ -84,14 +104,14 @@ export default function Channels() {
       message.success('已保存')
       setOpen(false)
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败')
+    } catch (e) {
+      message.error(getErrorMessage(e, '操作失败'))
     } finally {
       setSubmitting(false)
     }
   }
 
-  const openAcq = (rec?: Any) => {
+  const openAcq = (rec?: AcquisitionChannelOption) => {
     setAcqEditing(rec || null)
     acqForm.resetFields()
     if (rec) acqForm.setFieldsValue({ name: rec.name })
@@ -105,11 +125,11 @@ export default function Channels() {
       message.success('已保存')
       setAcqOpen(false)
       loadAcq()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败（名称可能重复）')
+    } catch (e) {
+      message.error(getErrorMessage(e, '操作失败（名称可能重复）'))
     }
   }
-  const toggleAcq = async (rec: Any) => {
+  const toggleAcq = async (rec: AcquisitionChannelOption) => {
     await client.patch(`/acquisition-channels/${rec.id}`, { active: !rec.active })
     loadAcq()
   }
@@ -118,8 +138,8 @@ export default function Channels() {
       await client.delete(`/acquisition-channels/${id}`)
       message.success('已删除')
       loadAcq()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+    } catch (e) {
+      message.error(getErrorMessage(e, '删除失败'))
     }
   }
   const doRemove = async (id: number) => {
@@ -127,8 +147,8 @@ export default function Channels() {
       await client.delete(`/channels/${id}`)
       message.success('已删除')
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+    } catch (e) {
+      message.error(getErrorMessage(e, '删除失败'))
     }
   }
 
@@ -138,16 +158,16 @@ export default function Channels() {
         <Button type="primary" style={{ marginBottom: 16 }} onClick={() => openForm()}>
           {isAdmin ? '新增渠道' : '新增个人渠道'}
         </Button>
-        {loadError && (
+        {!!loadError && (
           <Alert
             type="error"
             showIcon
-            message={loadError}
+            message={getErrorMessage(loadError, '渠道数据加载失败，请检查后端或数据库连接')}
             action={<Button size="small" onClick={load}>重新加载</Button>}
             style={{ marginBottom: 16 }}
           />
         )}
-        <Table
+        <Table<ChannelRecord>
           {...scrollTableProps}
           pagination={false}
           scroll={{ x: 'max-content' }}
@@ -190,7 +210,7 @@ export default function Channels() {
             <div style={{ marginBottom: 12 }}>
               当前余额（正=第三方欠公司，负=公司欠第三方）： CNY <b>{ledger.balances.CNY}</b> ， JPY <b>{ledger.balances.JPY}</b>
             </div>
-            <Table
+            <Table<LedgerEntry>
               {...smallTableProps}
               rowKey="id"
               pagination={false}
@@ -245,7 +265,8 @@ export default function Channels() {
           <b style={{ fontSize: 15 }}>获取渠道字典（自获取来源用）</b>
           <Button type="primary" onClick={() => openAcq()}>新增获取渠道</Button>
         </Space>
-        <Table
+        {!!acqError && <Alert type="error" showIcon message={getErrorMessage(acqError, '获取渠道加载失败')} action={<Button size="small" onClick={loadAcq}>重新加载</Button>} style={{ marginBottom: 12 }} />}
+        <Table<AcquisitionChannelOption>
           {...smallTableProps}
           rowKey="id"
           pagination={false}
@@ -256,7 +277,7 @@ export default function Channels() {
             {
               title: '操作',
               width: COL.actionWide,
-              render: (_: any, r: Any) => (
+              render: (_, r) => (
                 <Space wrap>
                   <ActionBtn tone="edit" onClick={() => openAcq(r)}>重命名</ActionBtn>
                   {r.active ? (

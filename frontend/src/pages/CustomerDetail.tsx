@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
+  Alert,
   Button,
   Card,
   Descriptions,
@@ -18,6 +19,9 @@ import {
 import { UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import client, { downloadFile } from '../api/client'
+import { getErrorMessage } from '../api/errors'
+import type { CustomerAttachment, CustomerDetailRecord, CustomerOrder, CustomerReferral, FollowUpFormValues, FollowUpRecord } from '../api/customerTypes'
+import { useRemoteData } from '../hooks/useRemoteData'
 import { useAuth } from '../auth/AuthContext'
 import {
   CUSTOMER_STATUS_LABEL,
@@ -34,27 +38,27 @@ import { moneyIn } from '../api/money'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, smallTableProps } from '../components/tableLayout'
 
-type Any = Record<string, any>
-
 export default function CustomerDetail() {
   const { id } = useParams()
   const { user } = useAuth()
-  const [c, setC] = useState<Any | null>(null)
   const [followOpen, setFollowOpen] = useState(false)
   const [aiSummary, setAiSummary] = useState<string | null>(null)
-  const [attachments, setAttachments] = useState<Any[]>([])
-  const [form] = Form.useForm()
+  const [form] = Form.useForm<FollowUpFormValues>()
   const canFollow = user?.role === 'SALES' || user?.role === 'BUSINESS_SUPERVISOR' || user?.role === 'ADMIN'
   const isAdmin = user?.role === 'ADMIN'
 
-  const load = () => client.get(`/customers/${id}`).then((r) => setC(r.data))
-  const loadAtt = () =>
-    client.get('/attachments', { params: { relatedType: 'Customer', relatedId: id } }).then((r) => setAttachments(r.data))
-  useEffect(() => {
-    load()
-    loadAtt()
+  const loadCustomer = useCallback(async () => {
+    const { data } = await client.get<CustomerDetailRecord>(`/customers/${id}`)
+    return data
   }, [id])
-  if (!c) return null
+  const { data: c, error, reload: load } = useRemoteData<CustomerDetailRecord | null>(loadCustomer, null)
+  const loadAttachments = useCallback(async () => {
+    const { data } = await client.get<CustomerAttachment[]>('/attachments', { params: { relatedType: 'Customer', relatedId: id } })
+    return data
+  }, [id])
+  const { data: attachments, error: attachmentError, reload: loadAtt } = useRemoteData(loadAttachments, [])
+  if (error) return <Alert type="error" showIcon message={getErrorMessage(error, '客户详情加载失败')} action={<Button onClick={load}>重新加载</Button>} />
+  if (!c || c.id !== Number(id)) return null
 
   const addFollow = async () => {
     const v = await form.validateFields()
@@ -73,7 +77,7 @@ export default function CustomerDetail() {
     load()
   }
   const doAi = async () => {
-    const { data } = await client.get(`/customers/${id}/ai-summary`)
+    const { data } = await client.get<{ summary: string }>(`/customers/${id}/ai-summary`)
     setAiSummary(data.summary)
   }
   const delOrder = async (oid: number) => {
@@ -81,8 +85,8 @@ export default function CustomerDetail() {
       await client.delete(`/orders/${oid}`)
       message.success('已删除')
       load()
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '删除失败')
+    } catch (e) {
+      message.error(getErrorMessage(e, '删除失败'))
     }
   }
 
@@ -145,7 +149,7 @@ export default function CustomerDetail() {
                     新增跟进
                   </Button>
                 )}
-                <Table
+                <Table<FollowUpRecord>
                   {...smallTableProps}
                   rowKey="id"
                   dataSource={c.followUps || []}
@@ -165,7 +169,7 @@ export default function CustomerDetail() {
             key: 'orders',
             label: `订单 (${c.orders?.length || 0})`,
             children: (
-              <Table
+              <Table<CustomerOrder>
                 {...smallTableProps}
                 rowKey="id"
                 dataSource={c.orders || []}
@@ -183,7 +187,7 @@ export default function CustomerDetail() {
                         {
                           title: '操作',
                           width: COL.action,
-                          render: (_: any, r: Any) => <DeleteBtn onConfirm={() => delOrder(r.id)} />,
+                          render: (_: unknown, r: CustomerOrder) => <DeleteBtn onConfirm={() => delOrder(r.id)} />,
                         },
                       ]
                     : []),
@@ -195,7 +199,7 @@ export default function CustomerDetail() {
             key: 'referrals',
             label: `转介绍收佣 (${c.referrals?.length || 0})`,
             children: (
-              <Table
+              <Table<CustomerReferral>
                 {...smallTableProps}
                 rowKey="id"
                 dataSource={c.referrals || []}
@@ -219,7 +223,8 @@ export default function CustomerDetail() {
                   showUploadList={false}
                   customRequest={async ({ file }) => {
                     const fd = new FormData()
-                    fd.append('file', file as File)
+                    if (!(file instanceof Blob)) throw new Error('请选择有效文件')
+                    fd.append('file', file)
                     fd.append('relatedType', 'Customer')
                     fd.append('relatedId', String(id))
                     await client.post('/attachments', fd)
@@ -229,7 +234,8 @@ export default function CustomerDetail() {
                 >
                   <Button icon={<UploadOutlined />} style={{ marginBottom: 12 }}>上传合同 / 凭证</Button>
                 </Upload>
-                <Table
+                {!!attachmentError && <Alert type="error" showIcon message={getErrorMessage(attachmentError, '附件加载失败')} action={<Button size="small" onClick={loadAtt}>重新加载</Button>} style={{ marginBottom: 12 }} />}
+                <Table<CustomerAttachment>
                   {...smallTableProps}
                   rowKey="id"
                   dataSource={attachments}
@@ -241,7 +247,7 @@ export default function CustomerDetail() {
                     {
                       title: '操作',
                       width: COL.action,
-                      render: (_: any, r: Any) => (
+                      render: (_, r) => (
                         <ActionBtn tone="view" onClick={() => downloadFile(`/attachments/${r.id}/file`, r.fileName)}>下载</ActionBtn>
                       ),
                     },
