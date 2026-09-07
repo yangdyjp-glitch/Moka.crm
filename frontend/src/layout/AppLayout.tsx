@@ -62,7 +62,6 @@ export default function AppLayout() {
   const current = NAV.find((n) => n.key !== '/' && loc.pathname.startsWith(n.key))
   const isDetail = loc.pathname.startsWith('/customers/') || loc.pathname.startsWith('/orders/')
   const showHeader = !!current && !isDetail
-  const fillContent = current?.key === '/channels'
 
   return (
     <Layout style={{ height: '100%' }}>
@@ -95,14 +94,11 @@ export default function AppLayout() {
         <Layout.Header style={{ background: 'transparent', padding: '0 24px', display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
           <NotificationBell />
         </Layout.Header>
-        <Layout.Content style={{ margin: 12, padding: 16, overflow: 'auto', ...(fillContent ? { display: 'flex', flexDirection: 'column', minHeight: 0 } : {}) }}>
+        <Layout.Content style={{ margin: 12, padding: 16, overflow: 'auto' }}>
           {showHeader ? (
             <>
               <PageHeader eyebrow={current!.en} title={current!.cn} />
-              <Card
-                style={fillContent ? { flex: 1, minHeight: 0 } : undefined}
-                styles={{ body: { padding: 12, ...(fillContent ? { height: '100%' } : {}) } }}
-              >
+              <Card styles={{ body: { padding: 12 } }}>
                 <Outlet />
               </Card>
             </>
