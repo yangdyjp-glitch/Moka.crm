@@ -39,9 +39,9 @@ export default function Login() {
         <Typography.Paragraph style={{ textAlign: 'center', color: '#64748b', marginBottom: 20 }}>
           客户与渠道管理系统
         </Typography.Paragraph>
-        <Form onFinish={onFinish} layout="vertical" initialValues={{ username: 'admin', password: 'admin123' }}>
+        <Form onFinish={onFinish} layout="vertical">
           <Form.Item name="username" label="账号" rules={[{ required: true }]}>
-            <Input size="large" placeholder="admin / market / sales / downstream" />
+            <Input size="large" placeholder="请输入账号" />
           </Form.Item>
           <Form.Item name="password" label="密码" rules={[{ required: true }]}>
             <Input.Password size="large" />
@@ -50,9 +50,6 @@ export default function Login() {
             登录
           </Button>
         </Form>
-        <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0, fontSize: 12 }}>
-          测试账号密码均为 admin123
-        </Typography.Paragraph>
       </Card>
     </div>
   )
