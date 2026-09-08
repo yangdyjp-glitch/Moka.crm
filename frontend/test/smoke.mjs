@@ -1,14 +1,19 @@
-// Run after npm run build: node test/smoke.mjs. Uses the real compiled app and local-only HTTP fixtures.
+// Run after npm run build: node --experimental-vm-modules test/smoke.mjs.
+// Uses the real compiled app, including lazy-loaded chunks, and local-only HTTP fixtures.
 import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { MessageChannel } from 'node:worker_threads'
+import * as vm from 'node:vm'
 import { JSDOM, VirtualConsole } from 'jsdom'
 
 const assets = new URL('../dist/assets/', import.meta.url)
-const bundleName = (await readdir(assets)).find((name) => /^index-.*\.js$/.test(name))
+const assetNames = new Set(await readdir(assets))
+const builtHtml = await readFile(new URL('../dist/index.html', import.meta.url), 'utf8')
+const bundleName = builtHtml.match(/<script\b[^>]*\bsrc="\/assets\/([^"]+\.js)"/)?.[1]
 assert.ok(bundleName, 'Build the frontend before running the smoke test')
-const bundle = await readFile(new URL(bundleName, assets), 'utf8')
+assert.ok(assetNames.has(bundleName), 'The HTML entry must exist in the build assets')
+assert.equal(typeof vm.SourceTextModule, 'function', 'Run node --experimental-vm-modules test/smoke.mjs')
 const customer = {
   id: 1, customerNo: 'KH000001', name: '测试客户', phone: null, wechat: null, email: null,
   sourceCategory: 'SELF', mainStatus: 'NEW_LEAD', intentionLevel: 'A', ownerUserId: 1,
@@ -73,6 +78,17 @@ const dashboard = (role) => ({
 let activeCase
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost')
+  if (request.method === 'GET' && url.pathname.startsWith('/assets/')) {
+    const name = url.pathname.slice('/assets/'.length)
+    if (!assetNames.has(name)) {
+      response.writeHead(404)
+      response.end('Unknown local build asset')
+      return
+    }
+    response.setHeader('Content-Type', name.endsWith('.css') ? 'text/css' : 'application/javascript')
+    response.end(await readFile(new URL(name, assets)))
+    return
+  }
   const chunks = []
   for await (const chunk of request) chunks.push(chunk)
   const text = Buffer.concat(chunks).toString()
@@ -81,7 +97,10 @@ const server = createServer(async (request, response) => {
   activeCase.requests.push(record)
   let value
   if (request.method === 'PATCH' && url.pathname === '/api/orders/1') {
-    activeCase.order = { ...activeCase.order, ...body }
+    activeCase.order = {
+      ...activeCase.order, ...body,
+      payments: [{ ...payment, remark: '已收到本地模拟保存响应' }],
+    }
     value = activeCase.order
   } else if (request.method === 'GET') {
     const fixtures = {
@@ -129,6 +148,41 @@ const server = createServer(async (request, response) => {
 })
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const origin = `http://127.0.0.1:${server.address().port}`
+
+async function evaluateBuild(dom) {
+  const context = dom.getInternalVMContext()
+  const modules = new Map()
+  let linkQueue = Promise.resolve()
+  const load = (url) => {
+    const name = url.pathname.slice('/assets/'.length)
+    assert.ok(url.origin === origin && url.pathname.startsWith('/assets/') && assetNames.has(name), `Blocked non-build module: ${url.href}`)
+    if (!modules.has(url.href)) {
+      modules.set(url.href, readFile(new URL(name, assets), 'utf8').then((source) => new vm.SourceTextModule(source, {
+        context,
+        identifier: url.href,
+        initializeImportMeta(meta) { meta.url = url.href },
+        async importModuleDynamically(specifier, parent) {
+          const child = await load(new URL(specifier, parent.identifier))
+          await link(child)
+          await child.evaluate()
+          return child
+        },
+      })))
+    }
+    return modules.get(url.href)
+  }
+  const linker = (specifier, parent) => load(new URL(specifier, parent.identifier))
+  const link = (module) => {
+    const pending = linkQueue.then(async () => {
+      if (module.status === 'unlinked') await module.link(linker)
+    })
+    linkQueue = pending.catch(() => {})
+    return pending
+  }
+  const entry = await load(new URL(`/assets/${bundleName}`, origin))
+  await link(entry)
+  await entry.evaluate()
+}
 
 async function waitFor(check, description, timeout = 6000) {
   const deadline = Date.now() + timeout
@@ -185,8 +239,7 @@ async function runCase({ role = 'ADMIN', path = '/', marker, endpoint, action })
     },
   })
   try {
-    // Vite emits an ES module, so preserve module strictness when evaluating without a module loader.
-    dom.window.eval(`'use strict';\n${bundle}`)
+    await evaluateBuild(dom)
     await waitFor(() => state.errors.length || (
       (dom.window.document.querySelector('main') || dom.window.document.querySelector('#root'))?.textContent.includes(marker)
       && (!endpoint || state.requests.some((request) => request.path === endpoint))
@@ -229,7 +282,17 @@ try {
     ['/reports', '财务', '/api/reports/finance'],
     ['/users', 'smoke_sales', '/api/users'],
     ['/audit-logs', '测试审计记录', '/api/audit-logs'],
-  ]) await runCase({ path, marker, endpoint })
+  ]) await runCase({
+    path, marker, endpoint,
+    action: path === '/payments' ? (window, state) => {
+      const row = [...window.document.querySelectorAll('tr')].find((element) => element.textContent.includes('SK000001'))
+      assert.ok(row, 'Confirmed payment is visible')
+      const deleteButton = [...row.querySelectorAll('button')].find((button) => button.textContent.includes('删除'))
+      assert.ok(deleteButton?.disabled, 'Confirmed payment deletion is disabled')
+      deleteButton.click()
+      assert.ok(!state.requests.some((request) => request.method === 'DELETE'), 'A disabled action must not delete the payment')
+    } : undefined,
+  })
 
   await runCase({
     path: '/orders/1', marker: 'DD000001', endpoint: '/api/orders/1',
@@ -247,9 +310,9 @@ try {
       assert.equal(payload.quantity, 2)
       assert.equal(payload.discountAmount, 1)
       assert.equal(payload.originalPrice, 2501)
-      assert.equal(payload.contractNo, null)
-      assert.equal(payload.remark, null)
-      await waitFor(() => state.requests.filter((request) => request.method === 'GET' && request.path === '/api/orders/1').length >= 2, 'order refresh after save')
+      assert.equal(Object.hasOwn(payload, 'contractNo'), false)
+      assert.equal(Object.hasOwn(payload, 'remark'), false)
+      await waitFor(() => document.querySelector('main')?.textContent.includes('已收到本地模拟保存响应'), 'order details update from the saved response')
     },
   })
   console.log('Compiled-app smoke checks passed: login render, five dashboard roles, eleven major routes, numeric order save and refresh. No production API was contacted.')

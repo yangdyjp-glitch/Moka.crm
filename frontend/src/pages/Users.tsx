@@ -1,48 +1,59 @@
 import { useEffect, useState } from 'react'
 import { Button, Form, Input, Modal, Select, Space, Table, Tag, message } from 'antd'
 import client from '../api/client'
-import { getErrorMessage } from '../api/errors'
+import { apiErrorMessage } from '../api/errors'
 import { ROLE_LABEL } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, pageTableProps } from '../components/tableLayout'
-import { useRemoteData } from '../hooks/useRemoteData'
 
-interface UserRecord {
+type UserRow = {
   id: number
   username: string
   name: string
-  role: 'ADMIN' | 'MARKET' | 'SALES' | 'BUSINESS_SUPERVISOR' | 'DOWNSTREAM_SALES'
-  status: string
+  role: string
+  status: 'active' | 'disabled'
 }
 
-interface UserFormValues {
+type UserForm = {
   username?: string
   name: string
   password?: string
-  role: UserRecord['role']
-  status?: string
+  role: string
+  status?: UserRow['status']
 }
 
-const loadUsers = async () => {
-  const { data } = await client.get<UserRecord[]>('/users')
-  return data
-}
+const fetchUsers = (signal?: AbortSignal) => client.get<UserRow[]>('/users', { signal })
 
 export default function Users() {
   const { user, impersonate } = useAuth()
-  const { data: rows, loading, error, reload } = useRemoteData(loadUsers, [])
+  const [rows, setRows] = useState<UserRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [reloadKey, setReloadKey] = useState(0)
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [impersonatingId, setImpersonatingId] = useState<number | null>(null)
-  const [editing, setEditing] = useState<UserRecord | null>(null)
-  const [form] = Form.useForm<UserFormValues>()
+  const [editing, setEditing] = useState<UserRow | null>(null)
+  const [form] = Form.useForm<UserForm>()
 
+  const reload = () => {
+    setLoading(true)
+    setReloadKey((current) => current + 1)
+  }
   useEffect(() => {
-    if (error) message.error(getErrorMessage(error, '用户加载失败'))
-  }, [error])
+    const controller = new AbortController()
+    let active = true
+    void fetchUsers(controller.signal)
+      .then((response) => { if (active) setRows(response.data) })
+      .catch((error: unknown) => { if (active) message.error(apiErrorMessage(error, '用户数据加载失败')) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [reloadKey])
 
-  const openForm = (rec?: UserRecord) => {
+  const openForm = (rec?: UserRow) => {
     setEditing(rec || null)
     form.resetFields()
     if (rec) form.setFieldsValue(rec)
@@ -57,8 +68,8 @@ export default function Users() {
       message.success('已保存')
       setOpen(false)
       reload()
-    } catch (e) {
-      message.error(getErrorMessage(e, '操作失败'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -68,11 +79,11 @@ export default function Users() {
       await client.delete(`/users/${id}`)
       message.success('已删除')
       reload()
-    } catch (e) {
-      message.error(getErrorMessage(e, '删除失败'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
-  const doImpersonate = (r: UserRecord) => {
+  const doImpersonate = (r: UserRow) => {
     Modal.confirm({
       title: `登录该账户：${r.name}`,
       content: (
@@ -89,8 +100,8 @@ export default function Users() {
         try {
           await impersonate(r.id)
           window.location.assign('/')
-        } catch (e) {
-          message.error(getErrorMessage(e, '代理登录失败'))
+        } catch (error: unknown) {
+          message.error(apiErrorMessage(error, '代理登录失败'))
           setImpersonatingId(null)
         }
       },
@@ -100,7 +111,7 @@ export default function Users() {
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={() => openForm()}>新增用户</Button>
-      <Table<UserRecord>
+      <Table<UserRow>
         {...pageTableProps}
         rowKey="id"
         loading={loading}

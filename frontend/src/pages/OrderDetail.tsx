@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { Alert, Button, Card, Form, Input, InputNumber, Space, Table, Tag, message } from 'antd'
+import { Alert, Button, Card, Form, Input, InputNumber, Space, Spin, Table, Tag, message } from 'antd'
 import client from '../api/client'
-import { getErrorMessage } from '../api/errors'
-import type { Order, OrderDetails, OrderEditValues, Payment, Refund } from '../api/financeTypes'
-import { useRemoteData } from '../hooks/useRemoteData'
+import { apiErrorMessage } from '../api/errors'
 import {
   CURRENCY_LABEL,
   ORDER_STATUS_LABEL,
@@ -16,11 +14,63 @@ import {
 import { moneyIn, moneyOut } from '../api/money'
 import { COL, smallTableProps } from '../components/tableLayout'
 
-function orderQuantity(order: Order) {
+type MoneyValue = string | number
+
+interface PaymentRecord {
+  id: number
+  paymentNo: string
+  createdAt: string
+  confirmedAt: string | null
+  amount: MoneyValue
+  confirmStatus: string
+  remark: string | null
+}
+
+interface RefundRecord {
+  id: number
+  refundNo: string
+  appliedAt: string
+  createdAt: string
+  completedAt: string | null
+  nominalAmount: MoneyValue
+  status: string
+}
+
+interface OrderDetails {
+  orderNo: string
+  currency: string
+  status: string
+  unitPrice: MoneyValue | null
+  quantity: number | null
+  originalPrice: MoneyValue
+  discountAmount: MoneyValue
+  contractNo: string | null
+  signedAt: string
+  remark: string | null
+  receivableAmount: MoneyValue
+  paidAmount: MoneyValue
+  unpaidAmount: MoneyValue
+  refundAmount: MoneyValue
+  customer: { name: string; customerNo: string }
+  product: { name: string }
+  payments: PaymentRecord[]
+  refunds: RefundRecord[]
+}
+
+interface OrderFormValues {
+  unitPrice: MoneyValue
+  quantity: number
+  discountAmount?: MoneyValue
+  contractNo?: string
+  signedAt?: string
+  remark?: string
+}
+
+function orderQuantity(order: OrderDetails) {
   return Number(order.quantity) || 1
 }
 
-function orderUnitPrice(order: Order) {
+function orderUnitPrice(order: OrderDetails) {
   return order.unitPrice != null ? Number(order.unitPrice) : Number(order.originalPrice || 0) / orderQuantity(order)
 }
 
@@ -30,54 +80,133 @@ function calcOriginalPrice(unitPrice: unknown, quantity: unknown) {
 
 export default function OrderDetail() {
   const { id } = useParams()
+  const orderId = id ?? ''
   const nav = useNavigate()
-  const fetchOrder = useCallback(async () => {
-    const { data } = await client.get<OrderDetails>(`/orders/${id}`)
-    return data
-  }, [id])
-  const { data: o, error, reload: load } = useRemoteData<OrderDetails | null>(fetchOrder, null)
+  const [orders, setOrders] = useState<Record<string, OrderDetails>>({})
+  const [loadErrors, setLoadErrors] = useState<Record<string, string>>({})
+  const [reloadKey, setReloadKey] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [form] = Form.useForm<OrderEditValues>()
+  const [form] = Form.useForm<OrderFormValues>()
+  const orderRequests = useRef(new Map<string, number>())
+  const mountedRef = useRef(true)
+  const o = orders[orderId] ?? null
+  const loadError = loadErrors[orderId]
   const unitPrice = Form.useWatch('unitPrice', form)
   const quantity = Form.useWatch('quantity', form)
   const currentOriginalPrice = calcOriginalPrice(unitPrice, quantity)
 
   useEffect(() => {
-    if (!o) return
-    form.setFieldsValue({
-      unitPrice: orderUnitPrice(o),
-      quantity: orderQuantity(o),
-      discountAmount: Number(o.discountAmount),
-      contractNo: o.contractNo,
-      signedAt: fmtDate(o.signedAt),
-      remark: o.remark,
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  const loadOrder = useCallback(async (signal?: AbortSignal) => {
+    if (!orderId) return
+    const requestId = (orderRequests.current.get(orderId) ?? 0) + 1
+    orderRequests.current.set(orderId, requestId)
+    const { data } = await client.get<OrderDetails>(`/orders/${orderId}`, {
+      noCache: true,
+      signal,
     })
-  }, [form, o])
+    if (mountedRef.current && !signal?.aborted && requestId === orderRequests.current.get(orderId)) {
+      setOrders((current) => ({ ...current, [orderId]: data }))
+      setLoadErrors((current) => {
+        if (!(orderId in current)) return current
+        const next = { ...current }
+        delete next[orderId]
+        return next
+      })
+      form.setFieldsValue({
+        unitPrice: orderUnitPrice(data),
+        quantity: orderQuantity(data),
+        discountAmount: Number(data.discountAmount),
+        contractNo: data.contractNo ?? undefined,
+        signedAt: fmtDate(data.signedAt),
+        remark: data.remark ?? undefined,
+      })
+    }
+  }, [form, orderId])
+
+  useEffect(() => {
+    if (!orderId) return
+    const controller = new AbortController()
+    void loadOrder(controller.signal).catch((error: unknown) => {
+      if (mountedRef.current && !controller.signal.aborted) {
+        setLoadErrors((current) => ({
+          ...current,
+          [orderId]: apiErrorMessage(error, '订单详情加载失败'),
+        }))
+      }
+    })
+    return () => controller.abort()
+  }, [loadOrder, orderId, reloadKey])
+
+  const retry = () => {
+    setLoadErrors((current) => {
+      if (!(orderId in current)) return current
+      const next = { ...current }
+      delete next[orderId]
+      return next
+    })
+    setReloadKey((current) => current + 1)
+  }
 
   const save = async () => {
     const v = await form.validateFields()
     setSaving(true)
     try {
-      await client.patch(`/orders/${id}`, {
+      const { data } = await client.patch<OrderDetails>(`/orders/${orderId}`, {
         ...v,
         quantity: Number(v.quantity) || 1,
         originalPrice: calcOriginalPrice(v.unitPrice, v.quantity),
       })
+      if (!mountedRef.current) return
       message.success('已保存')
-      load()
-    } catch (e: unknown) {
-      message.error(getErrorMessage(e, '保存失败'))
+      setOrders((current) => ({ ...current, [orderId]: data }))
+    } catch (error: unknown) {
+      if (mountedRef.current) message.error(apiErrorMessage(error, '保存失败'))
     } finally {
-      setSaving(false)
+      if (mountedRef.current) setSaving(false)
     }
   }
 
-  const errorAlert = error ? <Alert type="error" showIcon message={getErrorMessage(error, '订单详情加载失败')} action={<Button size="small" onClick={load}>重新加载</Button>} style={{ marginBottom: 16 }} /> : null
-  if (!o) return errorAlert
+  if (!orderId) {
+    return <Alert type="error" showIcon message="订单地址无效" description="缺少订单编号，无法加载详情。" />
+  }
+  if (!o && loadError) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message="订单详情加载失败"
+        description={loadError}
+        action={<Button size="small" onClick={retry}>重试</Button>}
+      />
+    )
+  }
+  if (!o) {
+    return (
+      <div style={{ minHeight: 240, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+        <Spin />
+        <span>正在加载订单详情…</span>
+      </div>
+    )
+  }
 
   return (
     <div>
-      {errorAlert}
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          message="订单详情刷新失败"
+          description={loadError}
+          action={<Button size="small" onClick={retry}>重试</Button>}
+          style={{ marginBottom: 12 }}
+        />
+      )}
       <Button onClick={() => nav('/orders')} style={{ marginBottom: 12 }}>
         ← 返回订单列表
       </Button>
@@ -135,7 +264,7 @@ export default function OrderDetail() {
       </Card>
 
       <Card title="收款记录" size="small" style={{ marginBottom: 16 }}>
-        <Table<Payment>
+        <Table
           {...smallTableProps}
           rowKey="id"
           pagination={false}
@@ -143,7 +272,7 @@ export default function OrderDetail() {
           columns={[
             { title: '收款号', dataIndex: 'paymentNo', width: COL.no },
             { title: '登记时间', dataIndex: 'createdAt', width: COL.date, render: fmtDate },
-            { title: '到账时间', dataIndex: 'confirmedAt', width: COL.date, render: (t: string | null, r) => (r.confirmStatus === 'CONFIRMED' ? fmtDate(t) : '—') },
+            { title: '到账时间', dataIndex: 'confirmedAt', width: COL.date, render: (t: string | null, r: PaymentRecord) => (r.confirmStatus === 'CONFIRMED' ? fmtDate(t) : '—') },
             { title: '金额', dataIndex: 'amount', width: COL.money, render: moneyIn, align: 'right' },
             { title: '状态', dataIndex: 'confirmStatus', width: COL.status, render: (s: string) => PAYMENT_CONFIRM_LABEL[s] },
             { title: '备注', dataIndex: 'remark', width: COL.note },
@@ -152,14 +281,14 @@ export default function OrderDetail() {
       </Card>
 
       <Card title="退款记录" size="small">
-        <Table<Refund>
+        <Table
           {...smallTableProps}
           rowKey="id"
           pagination={false}
           dataSource={o.refunds || []}
           columns={[
             { title: '退款号', dataIndex: 'refundNo', width: COL.no },
-            { title: '登记时间', dataIndex: 'appliedAt', width: COL.date, render: (t: string, r) => fmtDate(t ?? r.createdAt) },
+            { title: '登记时间', dataIndex: 'appliedAt', width: COL.date, render: (t: string | null, r: RefundRecord) => fmtDate(t ?? r.createdAt) },
             { title: '到账时间', dataIndex: 'completedAt', width: COL.date, render: fmtDate },
             { title: '名义额', dataIndex: 'nominalAmount', width: COL.money, render: moneyOut, align: 'right' },
             { title: '状态', dataIndex: 'status', width: COL.status, render: (s: string) => REFUND_STATUS_LABEL[s] },

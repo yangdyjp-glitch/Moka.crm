@@ -1,7 +1,7 @@
 import { Button, message } from 'antd'
 import { useState } from 'react'
 import { useAuth } from '../auth/AuthContext'
-import { getErrorMessage } from '../api/errors'
+import { apiErrorMessage } from '../api/errors'
 
 export default function ImpersonationBanner() {
   const { user, stopImpersonating } = useAuth()
@@ -14,8 +14,8 @@ export default function ImpersonationBanner() {
     try {
       await stopImpersonating()
       window.location.assign('/')
-    } catch (e) {
-      message.error(getErrorMessage(e, '退出代理登录失败'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '退出代理登录失败'))
       setLoading(false)
     }
   }

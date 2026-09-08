@@ -7,7 +7,7 @@
 - 本地目录：`D:\AI\Moka-CRM`；`origin` 指向 `https://github.com/yangdyjp-glitch/Moka.crm`，日常修改推送至 `origin/main`。
 - `upstream` 为原 `ty.crm` 仓库，仅用于读取；推送地址已设为 `DISABLED`。只有用户明确提出时才可恢复推送。
 - 下文的 TY Railway 地址属于复制前的项目背景，不代表 Moka 已配置相同部署；不要据此操作 TY 服务。
-- 前端改动检查：`npm run lint`、`npm test`、`npm run build`；构建后的模拟页面检查运行 `node test/smoke.mjs`。详见 `frontend/test/README.md`。
+- 前端改动检查：`npm run lint`、`npm test`、`npm run build`；构建后的模拟页面检查运行 `node --experimental-vm-modules test/smoke.mjs`。详见 `frontend/test/README.md`。
 
 ## 项目定位
 
@@ -207,7 +207,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 
 - 用户管理页：`frontend/src/pages/Users.tsx`，按钮文案是“登录该账户”
 - 全局横幅：`frontend/src/components/ImpersonationBanner.tsx`
-- 登录状态：`frontend/src/auth/AuthContext.tsx`
+- 登录状态与 Hook：`frontend/src/auth/AuthContext.ts`；Provider：`frontend/src/auth/AuthProvider.tsx`
 - 日志展示：`frontend/src/pages/AuditLogs.tsx` 的“代理登录日志”标签页
 
 ## UI 规范

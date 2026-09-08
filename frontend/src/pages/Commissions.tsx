@@ -1,9 +1,7 @@
-import { useCallback, useMemo, useState } from 'react'
-import { Alert, Button, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Modal, Select, Space, Table, Tabs, Tag, message } from 'antd'
 import client from '../api/client'
-import { getErrorMessage } from '../api/errors'
-import type { CashAccount, CommissionListItem, CommissionPaymentResult, PageResult } from '../api/financeTypes'
-import { useRemoteData } from '../hooks/useRemoteData'
+import { apiErrorMessage } from '../api/errors'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps } from '../components/tableLayout'
 import {
@@ -14,7 +12,70 @@ import {
   fmtMoney,
 } from '../api/types'
 
+type MoneyValue = number | string
+
+interface CommissionRow {
+  id: number
+  recordKey: string
+  customer?: { name?: string | null } | null
+  order?: { orderNo?: string | null } | null
+  paymentId?: number | null
+  paymentNo?: string | null
+  paymentRemark?: string | null
+  channelNameSnapshot?: string | null
+  fundSettlementMode: string
+  currency: string
+  payableAmount: MoneyValue
+  paidAmount: MoneyValue
+  status: string
+  suspended?: boolean
+  isPaymentInstallment?: boolean
+  parentStatus?: string
+  installmentIndex?: number
+}
+
+interface CashAccountRow {
+  orderId: number
+  customerName: string
+  channelName?: string | null
+  rebateStatus: string
+  fundSettlementMode: string
+  currency: string
+  contractAmount: MoneyValue
+  actualReceived: MoneyValue
+  balance: MoneyValue
+}
+
+interface ListResponse<T> {
+  items: T[]
+  total: number
+}
+
+interface PayResponse {
+  paymentNo?: string | null
+  payable: MoneyValue
+  offset: MoneyValue
+  cashOut: MoneyValue
+}
+
+type CommissionAction = 'pay' | 'review' | 'resume' | 'suspend' | 'cancel'
 const EMPTY_FILTER = '__EMPTY__'
+
+async function requestCommissions(selectedStatus?: string, signal?: AbortSignal) {
+  const { data } = await client.get<ListResponse<CommissionRow>>('/commissions', {
+    params: { all: 1, status: selectedStatus },
+    signal,
+  })
+  return data
+}
+
+async function requestCashAccounts(signal?: AbortSignal) {
+  const { data } = await client.get<ListResponse<CashAccountRow>>(
+    '/commissions/cash-accounts',
+    { params: { all: 1 }, signal },
+  )
+  return data
+}
 
 const CONFIRMABLE_STATUS = ['PENDING_REVIEW', 'PENDING_PAYMENT']
 const FINAL_STATUS = ['PAID', 'CANCELLED', 'SELF_DEDUCTED']
@@ -22,15 +83,18 @@ const REBATE_STATUS_COLOR: Record<string, string> = {
   未到账: 'default',
   部分自扣: 'gold',
   已自扣: 'blue',
-  未返佣: 'orange',
-  部分返佣: 'gold',
+  未返佣: 'red',
+  部分返佣: 'orange',
+  已部分返佣: 'orange',
   已返佣: 'green',
   无返佣: 'green',
 }
-const isSelfDeducted = (r: CommissionListItem) =>
+const rebateStatusLabel = (status: string) =>
+  status === '部分返佣' ? '已部分返佣' : status
+const isSelfDeducted = (r: CommissionRow) =>
   r.fundSettlementMode === 'AGENT_NET' || r.status === 'SELF_DEDUCTED'
 
-const canConfirmPayment = (r: CommissionListItem) =>
+const canConfirmPayment = (r: CommissionRow) =>
   r.fundSettlementMode === 'COMPANY_REBATE' &&
   CONFIRMABLE_STATUS.includes(r.status) &&
   !r.suspended
@@ -55,35 +119,104 @@ function uniqueFilters<T>(rows: T[], getValue: (row: T) => unknown, getText: (ro
 }
 
 export default function Commissions() {
+  const [data, setData] = useState<ListResponse<CommissionRow>>({ items: [], total: 0 })
   const [status, setStatus] = useState<string>()
-  const fetchCommissions = useCallback(async () => {
-    const { data } = await client.get<PageResult<CommissionListItem>>('/commissions', { params: { all: 1, status } })
-    return data
-  }, [status])
-  const { data, loading, error, reload: load } = useRemoteData(fetchCommissions, { items: [], total: 0 })
-  const fetchCash = useCallback(async () => {
-    const { data } = await client.get<PageResult<CashAccount>>('/commissions/cash-accounts', { params: { all: 1 } })
-    return data
-  }, [])
-  const { data: cashData, loading: cashLoading, error: cashError, reload: loadCash } = useRemoteData(fetchCash, { items: [], total: 0 })
+  const [loading, setLoading] = useState(true)
+  const [reloadKey, setReloadKey] = useState(0)
+  const [cashData, setCashData] = useState<ListResponse<CashAccountRow>>({ items: [], total: 0 })
+  const [cashLoading, setCashLoading] = useState(true)
+  const settlementRequestId = useRef(0)
+  const cashRequestId = useRef(0)
 
-  const act = async (row: CommissionListItem, action: 'pay' | 'resume' | 'suspend' | 'cancel') => {
+  const load = () => {
+    setLoading(true)
+    setReloadKey((key) => key + 1)
+  }
+
+  const loadCash = () => {
+    const requestId = ++cashRequestId.current
+    setCashLoading(true)
+    void requestCashAccounts()
+      .then((response) => {
+        if (requestId === cashRequestId.current) setCashData(response)
+      })
+      .catch((error: unknown) => {
+        if (requestId === cashRequestId.current) {
+          message.error(apiErrorMessage(error, '现金账目加载失败'))
+        }
+      })
+      .finally(() => {
+        if (requestId === cashRequestId.current) setCashLoading(false)
+      })
+  }
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const requestId = ++settlementRequestId.current
+    void requestCommissions(status, controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted && requestId === settlementRequestId.current) {
+          setData(response)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && requestId === settlementRequestId.current) {
+          message.error(apiErrorMessage(error, '分成数据加载失败'))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestId === settlementRequestId.current) {
+          setLoading(false)
+        }
+      })
+    return () => controller.abort()
+  }, [reloadKey, status])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const requestId = ++cashRequestId.current
+    void requestCashAccounts(controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted && requestId === cashRequestId.current) {
+          setCashData(response)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && requestId === cashRequestId.current) {
+          message.error(apiErrorMessage(error, '现金账目加载失败'))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestId === cashRequestId.current) {
+          setCashLoading(false)
+        }
+      })
+    return () => controller.abort()
+  }, [])
+
+  const changeStatus = (nextStatus?: string) => {
+    if (nextStatus === status) return
+    setLoading(true)
+    setStatus(nextStatus)
+  }
+
+  const act = async (row: CommissionRow, action: CommissionAction) => {
     try {
-      if (action === 'pay') {
-        const endpoint = row.paymentId
+      const endpoint =
+        action === 'pay' && row.paymentId
           ? `/commissions/${row.id}/pay-installment/${row.paymentId}`
-          : `/commissions/${row.id}/pay`
-        const { data: res } = await client.post<CommissionPaymentResult>(endpoint)
+          : `/commissions/${row.id}/${action}`
+      const { data: res } = await client.post<PayResponse>(endpoint)
+      if (action === 'pay') {
         const paymentText = res.paymentNo ? `（${res.paymentNo}）` : ''
         message.success(`已确认支付${paymentText}：应付 ${fmtMoney(res.payable)}，往来抵扣 ${fmtMoney(res.offset)}，实付现金 ${fmtMoney(res.cashOut)}`)
         loadCash()
       } else {
-        await client.post(`/commissions/${row.id}/${action}`)
         message.success('已更新')
       }
       load()
     } catch (e: unknown) {
-      message.error(getErrorMessage(e, '操作失败'))
+      message.error(apiErrorMessage(e, '操作失败'))
     }
   }
 
@@ -93,8 +226,8 @@ export default function Commissions() {
       message.success('已删除')
       load()
       loadCash()
-    } catch (e: unknown) {
-      message.error(getErrorMessage(e, '删除失败'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
@@ -115,7 +248,11 @@ export default function Commissions() {
     [cashData.items],
   )
   const cashRebateStatusFilters = useMemo(
-    () => uniqueFilters(cashData.items, (r) => r.rebateStatus),
+    () => uniqueFilters(
+      cashData.items,
+      (r) => r.rebateStatus,
+      (r) => rebateStatusLabel(r.rebateStatus),
+    ),
     [cashData.items],
   )
   const cashFundModeFilters = useMemo(
@@ -135,12 +272,11 @@ export default function Commissions() {
           placeholder="状态筛选"
           style={{ width: 160 }}
           value={status}
-          onChange={setStatus}
+          onChange={changeStatus}
           options={Object.entries(COMMISSION_STATUS_LABEL).map(([k, v]) => ({ value: k, label: v }))}
         />
       </Space>
-      {!!error && <Alert type="error" showIcon message={getErrorMessage(error, '分成数据加载失败')} action={<Button size="small" onClick={load}>重新加载</Button>} style={{ marginBottom: 16 }} />}
-      <Table<CommissionListItem>
+      <Table
         {...scrollTableProps}
         className="settlement-list-table full-height-list-table"
         rowKey="recordKey"
@@ -205,7 +341,7 @@ export default function Commissions() {
               if (isSelfDeducted(r)) return <Tag color="default">已自扣(报表)</Tag>
 
               if (r.isPaymentInstallment) {
-                const parentIsFinal = FINAL_STATUS.includes(r.parentStatus)
+                const parentIsFinal = FINAL_STATUS.includes(r.parentStatus ?? '')
                 const showParentActions = r.installmentIndex === 0 && !parentIsFinal
                 return (
                   <Space wrap>
@@ -263,7 +399,7 @@ export default function Commissions() {
   )
 
   const cashTable = (
-    <Table<CashAccount>
+    <Table
       {...scrollTableProps}
       className="cash-accounts-table full-height-list-table"
       rowKey="orderId"
@@ -285,7 +421,9 @@ export default function Commissions() {
           width: COL.status,
           filters: cashRebateStatusFilters,
           onFilter: (value, r) => filterValue(r.rebateStatus) === value,
-          render: (s: string) => <Tag color={REBATE_STATUS_COLOR[s]}>{s}</Tag>,
+          render: (s: string) => (
+            <Tag color={REBATE_STATUS_COLOR[s]}>{rebateStatusLabel(s)}</Tag>
+          ),
         },
         {
           title: '资金模式',
@@ -313,14 +451,7 @@ export default function Commissions() {
   return (
     <Tabs
       items={[
-        {
-          key: 'cash',
-          label: '现金账目',
-          children: <>
-            {!!cashError && <Alert type="error" showIcon message={getErrorMessage(cashError, '现金账目加载失败')} action={<Button size="small" onClick={loadCash}>重新加载</Button>} style={{ marginBottom: 16 }} />}
-            {cashTable}
-          </>,
-        },
+        { key: 'cash', label: '现金账目', children: cashTable },
         { key: 'settlement', label: '分成结算', children: settlementTable },
       ]}
     />

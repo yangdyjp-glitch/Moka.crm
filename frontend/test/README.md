@@ -7,7 +7,7 @@ npm ci
 npm run lint
 npm test
 npm run build
-node test/smoke.mjs
+node --experimental-vm-modules test/smoke.mjs
 ```
 
 `lint` 对错误和警告都执行零容忍检查，未关闭原有规则。
@@ -19,4 +19,4 @@ node test/smoke.mjs
 - GET 缓存、过期、跳过缓存、成功写入失效、失败写入和并发请求。
 - Axios 响应转换与缓存数据隔离、错误消息解析。
 
-`smoke.mjs` 在本机模拟接口上执行构建产物的页面检查。所有数据均为测试数据，不访问真实业务后端或数据库；该检查不替代线上实际账户与业务流程验收。
+`smoke.mjs` 在本机模拟接口上执行构建产物的页面检查，通过 Node 的 VM 模块加载器运行入口及按需加载的页面文件，因此需要 `--experimental-vm-modules`。所有数据均为测试数据，不访问真实业务后端或数据库；该检查不替代线上实际账户与业务流程验收。

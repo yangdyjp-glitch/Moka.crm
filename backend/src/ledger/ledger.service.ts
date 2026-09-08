@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Currency, LedgerEntryType } from '@prisma/client';
+import { Currency, LedgerEntryType, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 /**
@@ -13,28 +13,37 @@ import { PrismaService } from '../prisma/prisma.service';
 export class LedgerService {
   constructor(private prisma: PrismaService) {}
 
-  async getBalance(channelId: number, currency: Currency): Promise<number> {
-    const last = await this.prisma.channelLedger.findFirst({
+  async getBalance(
+    channelId: number,
+    currency: Currency,
+    tx?: Prisma.TransactionClient,
+  ): Promise<number> {
+    const client = tx ?? this.prisma;
+    const last = await client.channelLedger.findFirst({
       where: { channelId, currency },
       orderBy: { id: 'desc' },
     });
     return last ? Number(last.balanceAfter) : 0;
   }
 
-  async addEntry(p: {
-    channelId: number;
-    currency: Currency;
-    entryType: LedgerEntryType;
-    amount: number;
-    relatedOrderId?: number;
-    relatedRefundId?: number;
-    relatedCommissionId?: number;
-    note?: string;
-    operatorId?: number;
-  }) {
-    const prev = await this.getBalance(p.channelId, p.currency);
+  async addEntry(
+    p: {
+      channelId: number;
+      currency: Currency;
+      entryType: LedgerEntryType;
+      amount: number;
+      relatedOrderId?: number;
+      relatedRefundId?: number;
+      relatedCommissionId?: number;
+      note?: string;
+      operatorId?: number;
+    },
+    tx?: Prisma.TransactionClient,
+  ) {
+    const prev = await this.getBalance(p.channelId, p.currency, tx);
     const balanceAfter = Math.round((prev + p.amount) * 100) / 100;
-    return this.prisma.channelLedger.create({
+    const client = tx ?? this.prisma;
+    return client.channelLedger.create({
       data: {
         channelId: p.channelId,
         currency: p.currency,

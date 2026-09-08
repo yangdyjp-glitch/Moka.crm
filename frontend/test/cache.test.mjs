@@ -134,6 +134,85 @@ test('manual clear invalidates cached responses', async () => {
   assert.equal(calls.length, 2)
 })
 
+test('an earlier GET finishing last cannot overwrite a newer response for the same key', async () => {
+  let finishFirstGet
+  let firstGetStarted
+  const started = new Promise((resolve) => { firstGetStarted = resolve })
+  let getCount = 0
+  const { client } = setup((config) => {
+    getCount += 1
+    if (getCount === 1) {
+      firstGetStarted()
+      return new Promise((resolve) => {
+        finishFirstGet = () => resolve(response(config, '{"revision":"old"}'))
+      })
+    }
+    return response(config, '{"revision":"new"}')
+  })
+  const first = client.get('/customers')
+  await started
+  assert.deepEqual((await client.get('/customers')).data, { revision: 'new' })
+  finishFirstGet()
+  assert.deepEqual((await first).data, { revision: 'old' })
+  assert.deepEqual((await client.get('/customers')).data, { revision: 'new' })
+  assert.equal(getCount, 2)
+})
+
+test('request ordering is independent for different GET keys', async () => {
+  let finishCustomers
+  let customersStarted
+  const started = new Promise((resolve) => { customersStarted = resolve })
+  const { client, calls } = setup((config) => {
+    if (config.url === '/customers') {
+      customersStarted()
+      return new Promise((resolve) => {
+        finishCustomers = () => resolve(response(config, '{"source":"customers"}'))
+      })
+    }
+    return response(config, '{"source":"orders"}')
+  })
+  const customers = client.get('/customers')
+  await started
+  await client.get('/orders')
+  finishCustomers()
+  await customers
+  assert.deepEqual((await client.get('/customers')).data, { source: 'customers' })
+  assert.deepEqual((await client.get('/orders')).data, { source: 'orders' })
+  assert.equal(calls.length, 2)
+})
+
+test('an already-aborted request rejects even when a GET cache entry exists', async () => {
+  const { client, calls } = setup()
+  await client.get('/customers')
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(client.get('/customers', { signal: controller.signal }), axios.isCancel)
+  assert.equal(calls.length, 1)
+})
+
+test('an adapter finishing after request cancellation does not populate the GET cache', async () => {
+  let finishFirstGet
+  let firstGetStarted
+  const started = new Promise((resolve) => { firstGetStarted = resolve })
+  const { client, calls } = setup((config, sequence) => {
+    if (sequence === 1) {
+      firstGetStarted()
+      return new Promise((resolve) => {
+        finishFirstGet = () => resolve(response(config, '{"cancelled":true}'))
+      })
+    }
+    return response(config, '{"cancelled":false}')
+  })
+  const controller = new AbortController()
+  const first = client.get('/customers', { signal: controller.signal })
+  await started
+  controller.abort()
+  finishFirstGet()
+  await assert.rejects(first, axios.isCancel)
+  assert.deepEqual((await client.get('/customers')).data, { cancelled: false })
+  assert.equal(calls.length, 2)
+})
+
 test('cached responses use current request config and preserve response metadata', async () => {
   const { client, calls } = setup((config) => response(config, '{"id":1}', 201))
   await client.get('/customers', { headers: { 'x-trace': 'first' } })

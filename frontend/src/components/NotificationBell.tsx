@@ -1,17 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Badge, Dropdown, Empty, List, message } from 'antd'
 import { BellOutlined } from '@ant-design/icons'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { useAuth } from '../auth/AuthContext'
-import { useRemoteData } from '../hooks/useRemoteData'
 
-interface NotificationRecord {
+interface NotificationItem {
   id: number
   title: string
   isRead: boolean
 }
 
-interface ScanResult {
+interface NotificationScanResponse {
   scanned: {
     overdue: number
     pendingReview: number
@@ -19,39 +19,73 @@ interface ScanResult {
   }
 }
 
-const loadUnreadCount = async () => {
-  const { data } = await client.get<{ count: number }>('/notifications/unread-count')
-  return data.count
-}
-
 export default function NotificationBell() {
   const { user } = useAuth()
-  const { data: count, reload: reloadCount } = useRemoteData(loadUnreadCount, 0)
-  const [items, setItems] = useState<NotificationRecord[]>([])
+  const [count, setCount] = useState(0)
+  const [items, setItems] = useState<NotificationItem[]>([])
   const [open, setOpen] = useState(false)
+  const countRequest = useRef(0)
+  const listRequest = useRef(0)
 
-  const loadList = () =>
-    client.get<NotificationRecord[]>('/notifications').then((r) => setItems(r.data)).catch(() => {})
+  const loadCount = useCallback(async (signal?: AbortSignal) => {
+    const requestId = ++countRequest.current
+    try {
+      const { data } = await client.get<{ count: number }>('/notifications/unread-count', {
+        noCache: true,
+        signal,
+      })
+      if (!signal?.aborted && requestId === countRequest.current) setCount(data.count)
+    } catch {
+      // Polling failures are intentionally quiet; the next interval retries.
+    }
+  }, [])
+
+  const loadList = useCallback(async (signal?: AbortSignal) => {
+    const requestId = ++listRequest.current
+    try {
+      const { data } = await client.get<NotificationItem[]>('/notifications', {
+        noCache: true,
+        signal,
+      })
+      if (!signal?.aborted && requestId === listRequest.current) setItems(data)
+    } catch {
+      // Keep the last visible list when a refresh fails.
+    }
+  }, [])
 
   useEffect(() => {
-    const t = setInterval(reloadCount, 60000)
-    return () => clearInterval(t)
-  }, [reloadCount])
+    const controller = new AbortController()
+    const initialTimer = window.setTimeout(() => void loadCount(controller.signal), 0)
+    const timer = window.setInterval(() => void loadCount(controller.signal), 60000)
+    return () => {
+      controller.abort()
+      countRequest.current += 1
+      listRequest.current += 1
+      window.clearTimeout(initialTimer)
+      window.clearInterval(timer)
+    }
+  }, [loadCount, user?.id])
 
   const onOpen = (o: boolean) => {
     setOpen(o)
-    if (o) loadList()
+    if (o) void loadList()
   }
   const readAll = async () => {
-    await client.post('/notifications/read-all')
-    reloadCount()
-    loadList()
+    try {
+      await client.post('/notifications/read-all')
+      await Promise.all([loadCount(), loadList()])
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '标记通知失败'))
+    }
   }
   const scan = async () => {
-    const { data } = await client.post<ScanResult>('/notifications/scan')
-    message.success(`扫描完成：逾期${data.scanned.overdue}，待审核${data.scanned.pendingReview}，未缴${data.scanned.unpaid}`)
-    reloadCount()
-    loadList()
+    try {
+      const { data } = await client.post<NotificationScanResponse>('/notifications/scan')
+      message.success(`扫描完成：逾期${data.scanned.overdue}，待审核${data.scanned.pendingReview}，未缴${data.scanned.unpaid}`)
+      await Promise.all([loadCount(), loadList()])
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '扫描通知失败'))
+    }
   }
 
   const panel = (
@@ -64,10 +98,10 @@ export default function NotificationBell() {
         </span>
       </div>
       {items.length ? (
-        <List<NotificationRecord>
+        <List
           size="small"
           dataSource={items}
-          renderItem={(n) => (
+          renderItem={(n: NotificationItem) => (
             <List.Item style={{ opacity: n.isRead ? 0.45 : 1 }}>
               <Badge status={n.isRead ? 'default' : 'processing'} text={n.title} />
             </List.Item>

@@ -9,11 +9,13 @@ declare module 'axios' {
 /** Use Axios' adapter boundary so cached GETs retain normal request/response typing. */
 export function installGetCache(client: AxiosInstance, now = Date.now) {
   const entries = new Map<string, { time: number; response: AxiosResponse<unknown> }>()
+  const requestVersions = new Map<string, number>()
   const ttl = 30 * 60 * 1000
   let generation = 0
   const clear = () => {
     generation += 1
     entries.clear()
+    requestVersions.clear()
   }
 
   client.interceptors.request.use((config) => {
@@ -28,9 +30,17 @@ export function installGetCache(client: AxiosInstance, now = Date.now) {
       if (hit && now() - hit.time < ttl) {
         return { ...hit.response, data: structuredClone(hit.response.data), config: request }
       }
+      const requestVersion = (requestVersions.get(key) ?? 0) + 1
+      requestVersions.set(key, requestVersion)
       const response: AxiosResponse<unknown> = await adapter(request)
-      // A successful write invalidates even GETs that were already in flight.
-      if (requestGeneration === generation && response.status >= 200 && response.status < 300) {
+      // Successful writes invalidate in-flight reads; older reads cannot replace a
+      // later request for the same key when responses arrive out of order.
+      if (
+        requestGeneration === generation &&
+        requestVersions.get(key) === requestVersion &&
+        !request.signal?.aborted &&
+        response.status >= 200 && response.status < 300
+      ) {
         // Axios transforms the response after the adapter returns. Keep an independent
         // raw snapshot so a cache hit never transforms the previous result twice.
         try {

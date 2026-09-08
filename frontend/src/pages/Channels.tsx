@@ -1,4 +1,5 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { AxiosRequestConfig } from 'axios'
 import {
   Alert,
   Button,
@@ -14,9 +15,7 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import client from '../api/client'
-import { getErrorMessage } from '../api/errors'
-import type { AcquisitionChannelOption, ChannelOption } from '../api/models'
-import { useRemoteData } from '../hooks/useRemoteData'
+import { apiErrorMessage } from '../api/errors'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, scrollTableProps, smallTableProps } from '../components/tableLayout'
 import { useAuth } from '../auth/AuthContext'
@@ -29,65 +28,180 @@ import {
   SETTLEMENT_COND_LABEL,
 } from '../api/types'
 
-interface ChannelRecord extends ChannelOption {
-  contactName: string | null
-  contactInfo: string | null
+type MoneyValue = number | string
+
+interface ChannelRow {
+  id: number
+  name: string
+  channelType: string
+  commissionMethod: string
+  defaultCommissionAmount?: MoneyValue | null
+  defaultCommissionRate?: MoneyValue | null
+  fundSettlementMode: string
+  settlementCondition: string
+  contactName?: string | null
+  contactInfo?: string | null
 }
 
-type ChannelFormValues = Omit<ChannelRecord, 'id' | 'channelNo' | 'defaultCommissionRate' | 'defaultCommissionAmount'> & {
-  defaultCommissionRate?: number
+interface ChannelFormValues {
+  name: string
+  channelType: string
+  commissionMethod?: string
   defaultCommissionAmount?: number
+  defaultCommissionRate?: number
+  fundSettlementMode?: string
+  settlementCondition?: string
+  contactName?: string
+  contactInfo?: string
+}
+
+interface AcquisitionChannelRow {
+  id: number
+  name: string
+  active: boolean
+}
+
+interface AcquisitionChannelFormValues {
+  name: string
 }
 
 interface LedgerEntry {
   id: number
   createdAt: string
-  currency: 'CNY' | 'JPY'
+  currency: string
   entryType: string
-  amount: string | number
-  balanceAfter: string | number
-  note: string | null
+  amount: MoneyValue
+  balanceAfter: MoneyValue
+  note?: string | null
 }
 
-interface ChannelLedger {
+interface LedgerData {
+  balances: { CNY: MoneyValue; JPY: MoneyValue }
   entries: LedgerEntry[]
-  balances: { CNY: number; JPY: number }
+}
+
+type NoCacheRequestConfig = AxiosRequestConfig & { noCache: true }
+
+function noCacheConfig(signal?: AbortSignal): NoCacheRequestConfig {
+  return { noCache: true, signal }
+}
+
+async function requestChannels(signal?: AbortSignal) {
+  const { data } = await client.get<ChannelRow[]>('/channels', noCacheConfig(signal))
+  return data
+}
+
+async function requestAcquisitionChannels(signal?: AbortSignal) {
+  const { data } = await client.get<AcquisitionChannelRow[]>(
+    '/acquisition-channels/all',
+    noCacheConfig(signal),
+  )
+  return data
 }
 
 export default function Channels() {
   const { user } = useAuth()
   const isAdmin = user?.role === 'ADMIN'
+  const [rows, setRows] = useState<ChannelRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [editing, setEditing] = useState<ChannelRecord | null>(null)
+  const [editing, setEditing] = useState<ChannelRow | null>(null)
   const [form] = Form.useForm<ChannelFormValues>()
-  const [ledger, setLedger] = useState<ChannelLedger | null>(null)
+  const [ledger, setLedger] = useState<LedgerData | null>(null)
+  const [acqRows, setAcqRows] = useState<AcquisitionChannelRow[]>([])
   const [acqOpen, setAcqOpen] = useState(false)
-  const [acqEditing, setAcqEditing] = useState<AcquisitionChannelOption | null>(null)
-  const [acqForm] = Form.useForm<{ name: string }>()
+  const [acqEditing, setAcqEditing] = useState<AcquisitionChannelRow | null>(null)
+  const [acqForm] = Form.useForm<AcquisitionChannelFormValues>()
+  const channelRequestId = useRef(0)
+  const acquisitionRequestId = useRef(0)
   const commissionMethod = Form.useWatch('commissionMethod', form)
-
-  const loadChannels = useCallback(async () => {
-    const { data } = await client.get<ChannelRecord[]>('/channels', { noCache: true })
-    return data
-  }, [])
-  const { data: rows, loading, error: loadError, reload: load } = useRemoteData(loadChannels, [])
-  const loadAcquisitionChannels = useCallback(async () => {
-    const { data } = await client.get<AcquisitionChannelOption[]>('/acquisition-channels/all', { noCache: true })
-    return data
-  }, [])
-  const { data: acqRows, error: acqError, reload: loadAcq } = useRemoteData(loadAcquisitionChannels, [])
   const sortedRows = useMemo(() => sortByChannelNameKeyword(rows), [rows])
   const openLedger = async (id: number) => {
-    const { data } = await client.get<ChannelLedger>(`/channels/${id}/ledger`)
+    const { data } = await client.get<LedgerData>(`/channels/${id}/ledger`)
     setLedger(data)
   }
 
-  const openForm = (rec?: ChannelRecord) => {
+  const load = () => {
+    const requestId = ++channelRequestId.current
+    setLoading(true)
+    setLoadError('')
+    void requestChannels()
+      .then((data) => {
+        if (requestId !== channelRequestId.current) return
+        setRows(data)
+        setLoadError('')
+      })
+      .catch((error: unknown) => {
+        if (requestId === channelRequestId.current) {
+          setLoadError(apiErrorMessage(error, '渠道数据加载失败，请检查后端或数据库连接'))
+        }
+      })
+      .finally(() => {
+        if (requestId === channelRequestId.current) setLoading(false)
+      })
+  }
+
+  const loadAcq = () => {
+    const requestId = ++acquisitionRequestId.current
+    void requestAcquisitionChannels()
+      .then((data) => {
+        if (requestId === acquisitionRequestId.current) setAcqRows(data)
+      })
+      .catch((error: unknown) => {
+        if (requestId === acquisitionRequestId.current) {
+          message.error(apiErrorMessage(error, '获取渠道数据加载失败'))
+        }
+      })
+  }
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const channelRequest = ++channelRequestId.current
+    const acquisitionRequest = ++acquisitionRequestId.current
+    void requestChannels(controller.signal)
+      .then((data) => {
+        if (!controller.signal.aborted && channelRequest === channelRequestId.current) {
+          setRows(data)
+          setLoadError('')
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && channelRequest === channelRequestId.current) {
+          setLoadError(apiErrorMessage(error, '渠道数据加载失败，请检查后端或数据库连接'))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && channelRequest === channelRequestId.current) {
+          setLoading(false)
+        }
+      })
+    void requestAcquisitionChannels(controller.signal)
+      .then((data) => {
+        if (!controller.signal.aborted && acquisitionRequest === acquisitionRequestId.current) {
+          setAcqRows(data)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && acquisitionRequest === acquisitionRequestId.current) {
+          message.error(apiErrorMessage(error, '获取渠道数据加载失败'))
+        }
+      })
+    return () => controller.abort()
+  }, [])
+
+  const openForm = (rec?: ChannelRow) => {
     setEditing(rec || null)
     form.resetFields()
     if (rec) form.setFieldsValue({
-      ...rec,
+      name: rec.name,
+      channelType: rec.channelType,
+      commissionMethod: rec.commissionMethod,
+      fundSettlementMode: rec.fundSettlementMode,
+      settlementCondition: rec.settlementCondition,
+      contactName: rec.contactName ?? undefined,
+      contactInfo: rec.contactInfo ?? undefined,
       defaultCommissionRate: rec.defaultCommissionRate != null ? Number(rec.defaultCommissionRate) : undefined,
       defaultCommissionAmount: rec.defaultCommissionAmount != null ? Number(rec.defaultCommissionAmount) : undefined,
     })
@@ -104,14 +218,14 @@ export default function Channels() {
       message.success('已保存')
       setOpen(false)
       load()
-    } catch (e) {
-      message.error(getErrorMessage(e, '操作失败'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
   }
 
-  const openAcq = (rec?: AcquisitionChannelOption) => {
+  const openAcq = (rec?: AcquisitionChannelRow) => {
     setAcqEditing(rec || null)
     acqForm.resetFields()
     if (rec) acqForm.setFieldsValue({ name: rec.name })
@@ -125,11 +239,11 @@ export default function Channels() {
       message.success('已保存')
       setAcqOpen(false)
       loadAcq()
-    } catch (e) {
-      message.error(getErrorMessage(e, '操作失败（名称可能重复）'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败（名称可能重复）'))
     }
   }
-  const toggleAcq = async (rec: AcquisitionChannelOption) => {
+  const toggleAcq = async (rec: AcquisitionChannelRow) => {
     await client.patch(`/acquisition-channels/${rec.id}`, { active: !rec.active })
     loadAcq()
   }
@@ -138,8 +252,8 @@ export default function Channels() {
       await client.delete(`/acquisition-channels/${id}`)
       message.success('已删除')
       loadAcq()
-    } catch (e) {
-      message.error(getErrorMessage(e, '删除失败'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
   const doRemove = async (id: number) => {
@@ -147,8 +261,8 @@ export default function Channels() {
       await client.delete(`/channels/${id}`)
       message.success('已删除')
       load()
-    } catch (e) {
-      message.error(getErrorMessage(e, '删除失败'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
@@ -158,16 +272,16 @@ export default function Channels() {
         <Button type="primary" style={{ marginBottom: 16 }} onClick={() => openForm()}>
           {isAdmin ? '新增渠道' : '新增个人渠道'}
         </Button>
-        {!!loadError && (
+        {loadError && (
           <Alert
             type="error"
             showIcon
-            message={getErrorMessage(loadError, '渠道数据加载失败，请检查后端或数据库连接')}
+            message={loadError}
             action={<Button size="small" onClick={load}>重新加载</Button>}
             style={{ marginBottom: 16 }}
           />
         )}
-        <Table<ChannelRecord>
+        <Table
           {...scrollTableProps}
           pagination={false}
           scroll={{ x: 'max-content' }}
@@ -210,7 +324,7 @@ export default function Channels() {
             <div style={{ marginBottom: 12 }}>
               当前余额（正=第三方欠公司，负=公司欠第三方）： CNY <b>{ledger.balances.CNY}</b> ， JPY <b>{ledger.balances.JPY}</b>
             </div>
-            <Table<LedgerEntry>
+            <Table
               {...smallTableProps}
               rowKey="id"
               pagination={false}
@@ -265,8 +379,7 @@ export default function Channels() {
           <b style={{ fontSize: 15 }}>获取渠道字典（自获取来源用）</b>
           <Button type="primary" onClick={() => openAcq()}>新增获取渠道</Button>
         </Space>
-        {!!acqError && <Alert type="error" showIcon message={getErrorMessage(acqError, '获取渠道加载失败')} action={<Button size="small" onClick={loadAcq}>重新加载</Button>} style={{ marginBottom: 12 }} />}
-        <Table<AcquisitionChannelOption>
+        <Table
           {...smallTableProps}
           rowKey="id"
           pagination={false}
@@ -277,7 +390,7 @@ export default function Channels() {
             {
               title: '操作',
               width: COL.actionWide,
-              render: (_, r) => (
+              render: (_: unknown, r: AcquisitionChannelRow) => (
                 <Space wrap>
                   <ActionBtn tone="edit" onClick={() => openAcq(r)}>重命名</ActionBtn>
                   {r.active ? (

@@ -1,8 +1,10 @@
-import axios from 'axios';
+import axios, { type AxiosRequestConfig } from 'axios';
 import { installGetCache } from './cache';
 
 // 生产环境用 VITE_API_BASE（指向后端公网地址 + /api）；开发用 vite 代理的 /api
 const baseURL = import.meta.env.VITE_API_BASE || '/api';
+
+export type ApiRequestConfig<D = unknown> = AxiosRequestConfig<D>;
 
 const client = axios.create({ baseURL });
 

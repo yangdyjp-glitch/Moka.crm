@@ -14,55 +14,62 @@ import {
 } from 'antd'
 import dayjs from 'dayjs'
 import client from '../api/client'
-import { getErrorMessage } from '../api/errors'
+import { apiErrorMessage } from '../api/errors'
 import { CURRENCY_LABEL, fmtMoney } from '../api/types'
 import { ActionBtn, DeleteBtn } from '../components/Actions'
 import { COL, pageTableProps } from '../components/tableLayout'
-import { useRemoteData } from '../hooks/useRemoteData'
 
-interface CustomerOption {
+type ReferralRow = {
   id: number
-  name: string
-}
-
-interface ReferralRecord {
-  id: number
-  customer: CustomerOption
+  customer?: { id: number; name: string } | null
   serviceType: string
   downstreamCompany: string
-  commissionAmount: string | number
-  currency: 'CNY' | 'JPY'
-  settlementDate: string | null
+  commissionAmount: number | string
+  currency: string
+  settlementDate?: string | null
   collectionStatus: 'PENDING' | 'COLLECTED'
 }
 
-interface ReferralFormValues {
+type CustomerOption = { id: number; name: string }
+
+type ReferralForm = {
   customerId: number
   serviceType: string
   downstreamCompany: string
   commissionAmount: number
-  currency: ReferralRecord['currency']
+  currency: string
   settlementDate?: string
 }
 
 const SERVICE_TYPES = ['住房', '电话卡', '保险', '其他']
-
-const loadReferrals = async () => {
-  const { data } = await client.get<ReferralRecord[]>('/referrals')
-  return data
-}
+const fetchReferrals = (signal?: AbortSignal) => client.get<ReferralRow[]>('/referrals', { signal })
 
 export default function Referrals() {
   const nav = useNavigate()
-  const { data: rows, loading, error, reload } = useRemoteData(loadReferrals, [])
+  const [rows, setRows] = useState<ReferralRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [reloadKey, setReloadKey] = useState(0)
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
-  const [form] = Form.useForm<ReferralFormValues>()
+  const [form] = Form.useForm<ReferralForm>()
   const [customers, setCustomers] = useState<CustomerOption[]>([])
 
+  const reload = () => {
+    setLoading(true)
+    setReloadKey((current) => current + 1)
+  }
   useEffect(() => {
-    if (error) message.error(getErrorMessage(error, '转介绍收佣加载失败'))
-  }, [error])
+    const controller = new AbortController()
+    let active = true
+    void fetchReferrals(controller.signal)
+      .then((response) => { if (active) setRows(response.data) })
+      .catch((error: unknown) => { if (active) message.error(apiErrorMessage(error, '转介绍数据加载失败')) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [reloadKey])
 
   const openCreate = async () => {
     form.resetFields()
@@ -78,8 +85,8 @@ export default function Referrals() {
       message.success('已登记')
       setOpen(false)
       reload()
-    } catch (e) {
-      message.error(getErrorMessage(e, '操作失败'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '操作失败'))
     } finally {
       setSubmitting(false)
     }
@@ -93,15 +100,15 @@ export default function Referrals() {
       await client.delete(`/referrals/${id}`)
       message.success('已删除')
       reload()
-    } catch (e) {
-      message.error(getErrorMessage(e, '删除失败'))
+    } catch (error: unknown) {
+      message.error(apiErrorMessage(error, '删除失败'))
     }
   }
 
   return (
     <div>
       <Button type="primary" style={{ marginBottom: 16 }} onClick={openCreate}>登记转介绍收佣</Button>
-      <Table<ReferralRecord>
+      <Table<ReferralRow>
         {...pageTableProps}
         rowKey="id"
         loading={loading}

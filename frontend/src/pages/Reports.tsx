@@ -1,50 +1,140 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Card, DatePicker, Select, Space, Table, Tabs, message } from 'antd'
-import dayjs from 'dayjs'
+import dayjs, { type Dayjs } from 'dayjs'
 import client from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import {
   CURRENCY_LABEL,
   FUND_MODE_LABEL,
   fmtMoney,
 } from '../api/types'
 import { COL, smallTableProps } from '../components/tableLayout'
-import type { ChannelReportRow, FinanceReport, SalesReportRow } from '../api/reportTypes'
-import { useRemoteData } from '../hooks/useRemoteData'
-import { getErrorMessage } from '../api/errors'
 
 type Period = 'all' | 'year' | 'month'
+type MoneyValue = number | string | null
+
+type FinanceMetrics = {
+  currency: string
+  orderCount: number
+  receivableAmount: MoneyValue
+  channelPayable: MoneyValue
+  channelSettled: MoneyValue
+  pendingAgentDeduction: MoneyValue
+  pendingRebate: MoneyValue
+  companyActualReceived: MoneyValue
+  balance: MoneyValue
+}
+
+type FinanceSummaryRow = FinanceMetrics & {
+  confirmedReceived: MoneyValue
+  unpaidAmount: MoneyValue
+  refundAmount: MoneyValue
+}
+
+type FinanceModeRow = FinanceMetrics & { fundSettlementMode: string }
+type FinanceSalesRow = FinanceMetrics & { salesUserId?: number | null; salesName: string }
+type FinanceProductRow = FinanceMetrics & { productId: number; productName: string }
+
+type FinanceReport = {
+  summary: FinanceSummaryRow[]
+  byMode: FinanceModeRow[]
+  bySales: FinanceSalesRow[]
+  byProduct: FinanceProductRow[]
+}
+
+type ChannelReportRow = {
+  channelId: number
+  currency: string
+  channel?: { name: string } | null
+  _count: number
+  _sum?: {
+    payableAmount?: MoneyValue
+    paidAmount?: MoneyValue
+    unpaidAmount?: MoneyValue
+  }
+}
+
+type SalesReportRow = {
+  ownerUserId: number
+  name: string
+  customerCount: number
+  signedCount: number
+}
+
+function reportParams(period: Period, year: Dayjs, month: Dayjs) {
+  if (period === 'year') return { period, year: String(year.year()) }
+  if (period === 'month') return { period, month: month.format('YYYY-MM') }
+  return { period }
+}
 
 export default function Reports() {
+  const [finance, setFinance] = useState<FinanceReport | null>(null)
+  const [financeLoading, setFinanceLoading] = useState(true)
   const [period, setPeriod] = useState<Period>('all')
   const [year, setYear] = useState(dayjs())
   const [month, setMonth] = useState(dayjs())
-  const params = useMemo(() =>
-      period === 'year'
-        ? { period, year: String(year.year()) }
-        : period === 'month'
-          ? { period, month: month.format('YYYY-MM') }
-          : { period }, [period, year, month])
-
-  const loadChannelsSales = useCallback(async () => {
-    const [channels, sales] = await Promise.all([
-      client.get<ChannelReportRow[]>('/reports/channels', { params }),
-      client.get<SalesReportRow[]>('/reports/sales', { params }),
-    ])
-    return { channels: channels.data, sales: sales.data }
-  }, [params])
-  const { data: { channels, sales }, loading: channelsSalesLoading, error: channelsError } =
-    useRemoteData(loadChannelsSales, { channels: [], sales: [] })
-
-  const loadFinance = useCallback(async () => {
-    const response = await client.get<FinanceReport>('/reports/finance', { params })
-    return response.data
-  }, [params])
-  const { data: finance, loading: financeLoading, error: financeError } = useRemoteData<FinanceReport | null>(loadFinance, null)
+  const [channels, setChannels] = useState<ChannelReportRow[]>([])
+  const [sales, setSales] = useState<SalesReportRow[]>([])
+  const [channelsSalesLoading, setChannelsSalesLoading] = useState(true)
 
   useEffect(() => {
-    if (channelsError) message.error(getErrorMessage(channelsError, '渠道/销售统计加载失败'))
-    if (financeError) message.error(getErrorMessage(financeError, '财务统计加载失败'))
-  }, [channelsError, financeError])
+    let active = true
+    const controller = new AbortController()
+    const params = reportParams(period, year, month)
+    void Promise.resolve().then(async () => {
+      if (!active) return
+      setChannelsSalesLoading(true)
+      try {
+        const [channelsResponse, salesResponse] = await Promise.all([
+          client.get<ChannelReportRow[]>('/reports/channels', { params, signal: controller.signal }),
+          client.get<SalesReportRow[]>('/reports/sales', { params, signal: controller.signal }),
+        ])
+        if (!active) return
+        setChannels(channelsResponse.data)
+        setSales(salesResponse.data)
+      } catch (error: unknown) {
+        if (active) {
+          setChannels([])
+          setSales([])
+          message.error(apiErrorMessage(error, '渠道与销售报表加载失败'))
+        }
+      } finally {
+        if (active) setChannelsSalesLoading(false)
+      }
+    })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [period, year, month])
+
+  useEffect(() => {
+    let active = true
+    const controller = new AbortController()
+    const params = reportParams(period, year, month)
+    void Promise.resolve().then(async () => {
+      if (!active) return
+      setFinanceLoading(true)
+      try {
+        const response = await client.get<FinanceReport>('/reports/finance', {
+          params,
+          signal: controller.signal,
+        })
+        if (active) setFinance(response.data)
+      } catch (error: unknown) {
+        if (active) {
+          setFinance(null)
+          message.error(apiErrorMessage(error, '财务报表加载失败'))
+        }
+      } finally {
+        if (active) setFinanceLoading(false)
+      }
+    })
+    return () => {
+      active = false
+      controller.abort()
+    }
+  }, [period, year, month])
 
   const periodFilter = (
     <Space style={{ marginBottom: 12 }} wrap>
@@ -77,12 +167,12 @@ export default function Reports() {
             <>
               {periodFilter}
               <Card title="公司现金总览（按币种）" size="small" style={{ marginBottom: 16 }}>
-                <Table
+                <Table<FinanceSummaryRow>
                   {...smallTableProps}
                   className="finance-report-table"
                   scroll={undefined}
                   pagination={false}
-                  rowKey="currency"
+                  rowKey={(r) => r.currency}
                   loading={financeLoading}
                   dataSource={finance?.summary || []}
                   columns={[
@@ -102,7 +192,7 @@ export default function Reports() {
                 />
               </Card>
               <Card title="资金模式拆分（按币种 × 模式）" size="small" style={{ marginBottom: 16 }}>
-                <Table
+                <Table<FinanceModeRow>
                   {...smallTableProps}
                   className="finance-report-table"
                   scroll={undefined}
@@ -134,7 +224,7 @@ export default function Reports() {
             <>
               {periodFilter}
               <Card title="渠道统计" size="small" style={{ marginBottom: 16 }}>
-                <Table
+                <Table<ChannelReportRow>
                   {...smallTableProps}
                   pagination={false}
                   rowKey={(r) => r.channelId + r.currency}
@@ -151,10 +241,10 @@ export default function Reports() {
                 />
               </Card>
               <Card title="销售统计" size="small">
-                <Table
+                <Table<SalesReportRow>
                   {...smallTableProps}
                   pagination={false}
-                  rowKey="ownerUserId"
+                  rowKey={(r) => r.ownerUserId}
                   loading={channelsSalesLoading}
                   dataSource={sales}
                   columns={[
@@ -165,7 +255,7 @@ export default function Reports() {
                 />
               </Card>
               <Card title="销售拆分（按币种 × 销售）" size="small" style={{ marginBottom: 16 }}>
-                <Table
+                <Table<FinanceSalesRow>
                   {...smallTableProps}
                   className="finance-report-table"
                   scroll={undefined}
@@ -188,7 +278,7 @@ export default function Reports() {
                 />
               </Card>
               <Card title="产品拆分（按币种 × 产品）" size="small">
-                <Table
+                <Table<FinanceProductRow>
                   {...smallTableProps}
                   className="finance-report-table"
                   scroll={undefined}

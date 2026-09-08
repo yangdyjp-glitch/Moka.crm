@@ -19,7 +19,7 @@ interface AuditLogRecord {
 interface ImpersonationLogRecord {
   id: number
   createdAt: string
-  action: string
+  action: 'start' | 'stop'
   actorId: number
   actorName: string
   actorUsername: string
