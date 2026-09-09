@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import { MessageChannel } from 'node:worker_threads'
 import * as vm from 'node:vm'
 import { JSDOM, VirtualConsole } from 'jsdom'
@@ -55,6 +56,17 @@ const commission = {
   fundSettlementMode: 'COMPANY_REBATE', currency: 'JPY', payableAmount: '62.50',
   paidAmount: '0.00', status: 'PENDING_REVIEW', suspended: false,
 }
+const maintenanceRecord = {
+  id: 1, channelId: 1, channel, maintainedAt: '2026-09-09T00:00:00Z',
+  content: '本地渠道维护记录', nextMaintenanceAt: '2026-09-20T00:00:00Z',
+  createdBy: { id: 1, name: '测试管理员', username: 'smoke_user' },
+}
+const maintenanceExpense = {
+  id: 1, channelId: 1, channel, incurredAt: '2026-09-09T00:00:00Z',
+  category: 'HOTEL', amount: '123.45', currency: 'CNY', note: '本地酒店费用',
+  createdBy: maintenanceRecord.createdBy,
+  receipt: { id: 1, fileName: 'local-receipt.pdf', contentType: 'application/pdf', size: 8 },
+}
 const page = (items) => ({ items, total: items.length })
 const financeSummary = (currency) => ({
   currency, orderCount: 1, receivableAmount: 2500, confirmedReceived: 500, unpaidAmount: 2000,
@@ -91,9 +103,12 @@ const server = createServer(async (request, response) => {
   }
   const chunks = []
   for await (const chunk of request) chunks.push(chunk)
-  const text = Buffer.concat(chunks).toString()
-  const body = text ? JSON.parse(text) : null
-  const record = { method: request.method, path: url.pathname, body }
+  const bytes = Buffer.concat(chunks)
+  const contentType = request.headers['content-type'] ?? ''
+  const body = !bytes.length ? null : contentType.startsWith('multipart/form-data')
+    ? Object.fromEntries(await new Response(bytes, { headers: { 'content-type': contentType } }).formData())
+    : JSON.parse(bytes.toString())
+  const record = { method: request.method, path: url.pathname, body, query: Object.fromEntries(url.searchParams) }
   activeCase.requests.push(record)
   let value
   if (request.method === 'PATCH' && url.pathname === '/api/orders/1') {
@@ -102,6 +117,12 @@ const server = createServer(async (request, response) => {
       payments: [{ ...payment, remark: '已收到本地模拟保存响应' }],
     }
     value = activeCase.order
+  } else if (request.method === 'PATCH' && url.pathname === '/api/channel-maintenance/records/1') {
+    activeCase.maintenance = { ...activeCase.maintenance, ...body }
+    value = activeCase.maintenance
+  } else if (request.method === 'PATCH' && url.pathname === '/api/channel-maintenance/expenses/1') {
+    activeCase.expense = { ...activeCase.expense, ...body, receipt: body.removeReceipt === 'true' ? null : activeCase.expense.receipt }
+    value = activeCase.expense
   } else if (request.method === 'GET') {
     const fixtures = {
       '/api/notifications/unread-count': { count: 0 },
@@ -123,6 +144,12 @@ const server = createServer(async (request, response) => {
       '/api/products': [product],
       '/api/channels': [channel],
       '/api/channels/options': [channel],
+      '/api/channel-maintenance/channels': [channel],
+      '/api/channel-maintenance/records': { rows: [activeCase.maintenance,
+        { ...maintenanceRecord, id: 2, content: '其他人的维护记录', createdBy: { id: 2, name: '其他市场', username: 'other' } }],
+        total: 2, page: Number(url.searchParams.get('page') ?? 1), pageSize: 20 },
+      '/api/channel-maintenance/expenses': { rows: [activeCase.expense], total: 21,
+        page: Number(url.searchParams.get('page') ?? 1), pageSize: 20, summary: { CNY: '1234.56', JPY: '7890' } },
       '/api/acquisition-channels/all': [{ id: 1, name: '测试获客渠道', active: true }],
       '/api/acquisition-channels': [{ id: 1, name: '测试获客渠道', active: true }],
       '/api/reports/channels': [],
@@ -193,8 +220,23 @@ async function waitFor(check, description, timeout = 6000) {
   throw new Error(`Timed out: ${description}`)
 }
 
+function editInput(window, input, value) {
+  assert.ok(input, 'Expected form field is rendered')
+  const prototype = input.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype
+  Object.getOwnPropertyDescriptor(prototype, 'value').set.call(input, value)
+  input.dispatchEvent(new window.Event('input', { bubbles: true }))
+  input.dispatchEvent(new window.Event('change', { bubbles: true }))
+}
+
+function buttonByText(document, label, scope = document) {
+  const button = [...scope.querySelectorAll('button')].find((element) => element.textContent.replace(/\s/g, '') === label)
+  assert.ok(button, `Button ${label} is rendered`)
+  return button
+}
+
 async function runCase({ role = 'ADMIN', path = '/', marker, endpoint, action }) {
-  const state = { role, requests: [], errors: [], channels: [], order: structuredClone(originalOrder) }
+  const state = { role, requests: [], errors: [], channels: [], order: structuredClone(originalOrder),
+    maintenance: structuredClone(maintenanceRecord), expense: structuredClone(maintenanceExpense) }
   activeCase = state
   const virtualConsole = new VirtualConsole()
   virtualConsole.on('jsdomError', (error) => {
@@ -210,6 +252,7 @@ async function runCase({ role = 'ADMIN', path = '/', marker, endpoint, action })
         window.localStorage.setItem('user', JSON.stringify({ id: 1, username: 'smoke_user', name: '测试管理员', role }))
       }
       window.structuredClone = structuredClone
+      window.crypto.randomUUID = randomUUID
       window.MessageChannel = class extends MessageChannel {
         constructor() { super(); state.channels.push(this) }
       }
@@ -295,6 +338,84 @@ try {
   })
 
   await runCase({
+    path: '/channel-maintenance', marker: '本地渠道维护记录', endpoint: '/api/channel-maintenance/records',
+    async action(window, state) {
+      const document = window.document
+      assert.ok(document.querySelector('main')?.textContent.includes('渠道维护'))
+      const recordRow = [...document.querySelectorAll('tr')].find((row) => row.textContent.includes('本地渠道维护记录'))
+      buttonByText(document, '编辑', recordRow).click()
+      await waitFor(() => document.querySelector('#maintenance_record_maintainedAt')?.value === '2026-09-09', 'maintenance dates hydrate')
+      assert.equal(document.querySelector('#maintenance_record_nextMaintenanceAt').value, '2026-09-20')
+      editInput(window, document.querySelector('#maintenance_record_nextMaintenanceAt'), '')
+      const beforeSave = state.requests.length
+      buttonByText(document, '保存', document.querySelector('.ant-modal')).click()
+      await waitFor(() => state.requests.slice(beforeSave).some((request) => request.method === 'GET' && request.path === '/api/channel-maintenance/records'), 'maintenance save refresh')
+      const savedRecord = state.requests.find((request) => request.method === 'PATCH' && request.path === '/api/channel-maintenance/records/1')
+      assert.equal(savedRecord.body.maintainedAt, '2026-09-09')
+      assert.equal(savedRecord.body.nextMaintenanceAt, null)
+      assert.equal(savedRecord.body.content, '本地渠道维护记录')
+
+      const expenseTab = [...document.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === '公关费用')
+      assert.ok(expenseTab)
+      expenseTab.click()
+      await waitFor(() => document.body.textContent.includes('本地酒店费用'), 'admin expense rows')
+      assert.ok(document.body.textContent.includes('1,234.56'), 'Summary uses all-pages server CNY total, not visible rows')
+      assert.ok(document.body.textContent.includes('7,890'), 'JPY total stays separate')
+      const expenseRow = [...document.querySelectorAll('tr')].find((row) => row.textContent.includes('本地酒店费用'))
+      buttonByText(document, '编辑', expenseRow).click()
+      await waitFor(() => document.querySelector('#maintenance_expense_amount')?.value === '123.45', 'expense decimal string hydration')
+      assert.ok(document.querySelector('.ant-modal').textContent.includes('local-receipt.pdf（保留）'))
+      editInput(window, document.querySelector('#maintenance_expense_amount'), '234.56')
+      buttonByText(document, '保存', document.querySelector('.ant-modal')).click()
+      await waitFor(() => state.requests.some((request) => request.method === 'PATCH' && request.path === '/api/channel-maintenance/expenses/1'), 'multipart expense save')
+      const savedExpense = state.requests.find((request) => request.method === 'PATCH' && request.path === '/api/channel-maintenance/expenses/1')
+      assert.equal(savedExpense.body.amount, '234.56')
+      assert.equal(savedExpense.body.currency, 'CNY')
+      assert.equal(savedExpense.body.incurredAt, '2026-09-09')
+      assert.equal(Object.hasOwn(savedExpense.body, 'removeReceipt'), false)
+      assert.equal(Object.hasOwn(savedExpense.body, 'file'), false)
+      assert.equal(Object.hasOwn(savedExpense.body, 'requestId'), false)
+      await waitFor(() => !document.querySelector('.ant-modal') && document.body.textContent.includes('234.56'), 'expense refresh after save')
+      document.querySelector('.ant-pagination-next button').click()
+      await waitFor(() => state.requests.some((request) => request.path === '/api/channel-maintenance/expenses' && request.query.page === '2'), 'server pagination')
+      editInput(window, document.querySelector('[aria-label="开始日期"]'), '2026-09-01')
+      editInput(window, document.querySelector('[aria-label="结束日期"]'), '2026-09-30')
+      buttonByText(document, '查询').click()
+      await waitFor(() => state.requests.some((request) => request.path === '/api/channel-maintenance/expenses'
+        && request.query.page === '1' && request.query.startDate === '2026-09-01' && request.query.endDate === '2026-09-30'), 'date filters reset pagination')
+      buttonByText(document, '登记公关费用').click()
+      await waitFor(() => document.querySelector('#maintenance_expense_note'), 'new expense modal')
+      editInput(window, document.querySelector('#maintenance_expense_note'), '不应保留的草稿')
+      buttonByText(document, '取消', document.querySelector('.ant-modal')).click()
+      await waitFor(() => !document.querySelector('.ant-modal'), 'expense cancel')
+      buttonByText(document, '登记公关费用').click()
+      await waitFor(() => document.querySelector('#maintenance_expense_note'), 'fresh expense modal')
+      assert.equal(document.querySelector('#maintenance_expense_note').value, '')
+      assert.equal(document.querySelector('#maintenance_expense_amount').value, '')
+      buttonByText(document, '取消', document.querySelector('.ant-modal')).click()
+    },
+  })
+  for (const role of ['MARKET', 'BUSINESS_SUPERVISOR']) await runCase({
+    role, path: '/channel-maintenance', marker: '本地渠道维护记录', endpoint: '/api/channel-maintenance/records',
+    action(window, state) {
+      const document = window.document
+      assert.equal([...document.querySelectorAll('[role="tab"]')].some((tab) => tab.textContent === '公关费用'), false)
+      assert.equal(state.requests.some((request) => request.path.includes('/channel-maintenance/expenses')), false)
+      const own = [...document.querySelectorAll('tr')].find((row) => row.textContent.includes('本地渠道维护记录'))
+      const other = [...document.querySelectorAll('tr')].find((row) => row.textContent.includes('其他人的维护记录'))
+      assert.ok(own.querySelectorAll('button').length > 0, 'Own maintenance record has actions')
+      assert.equal(other.querySelectorAll('button').length, 0, 'Other users maintenance records cannot be edited')
+    },
+  })
+  for (const role of ['SALES', 'DOWNSTREAM_SALES']) await runCase({
+    role, path: '/channel-maintenance', marker: '无权访问渠道维护',
+    action(window, state) {
+      assert.equal(state.requests.some((request) => request.path.startsWith('/api/channel-maintenance')), false)
+      assert.equal([...window.document.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent.includes('渠道维护')), false)
+    },
+  })
+
+  await runCase({
     path: '/orders/1', marker: 'DD000001', endpoint: '/api/orders/1',
     async action(window, state) {
       const document = window.document
@@ -315,7 +436,7 @@ try {
       await waitFor(() => document.querySelector('main')?.textContent.includes('已收到本地模拟保存响应'), 'order details update from the saved response')
     },
   })
-  console.log('Compiled-app smoke checks passed: login render, five dashboard roles, eleven major routes, numeric order save and refresh. No production API was contacted.')
+  console.log('Compiled-app smoke checks passed: login, five dashboard roles, eleven major routes, channel maintenance role gates, edits, receipt preservation, pagination/filtering and numeric order save. No production API was contacted.')
 } finally {
   await new Promise((resolve) => server.close(resolve))
 }

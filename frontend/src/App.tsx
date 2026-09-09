@@ -8,6 +8,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Customers = lazy(() => import('./pages/Customers'))
 const CustomerDetail = lazy(() => import('./pages/CustomerDetail'))
 const Channels = lazy(() => import('./pages/Channels'))
+const ChannelMaintenance = lazy(() => import('./pages/ChannelMaintenance'))
 const Products = lazy(() => import('./pages/Products'))
 const Orders = lazy(() => import('./pages/Orders'))
 const OrderDetail = lazy(() => import('./pages/OrderDetail'))
@@ -63,6 +64,7 @@ export default function App() {
             <Route path="customers" element={<Customers />} />
             <Route path="customers/:id" element={<CustomerDetail />} />
             <Route path="channels" element={<Channels />} />
+            <Route path="channel-maintenance" element={<ChannelMaintenance />} />
             <Route path="products" element={<Products />} />
             <Route path="orders" element={<Orders />} />
             <Route path="orders/:id" element={<OrderDetail />} />
