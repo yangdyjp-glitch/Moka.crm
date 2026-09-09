@@ -37,6 +37,13 @@ enum ChannelType {
   ENTERPRISE // 企业
 }
 
+enum ChannelExpenseCategory {
+  HOTEL // 酒店
+  TRANSPORT // 交通
+  GIFT // 伴手礼
+  ENTERTAINMENT // 宴请
+}
+
 enum FundSettlementMode {
   COMPANY_DIRECT // 公司直接签约·直收，无第三方返佣
   AGENT_NET // 第三方代收·净额结算
@@ -181,6 +188,9 @@ model User {
   updatedAt    DateTime  @updatedAt
   deletedAt    DateTime?
 
+  maintenanceRecords ChannelMaintenanceRecord[]
+  channelExpenses    ChannelExpense[]
+
   @@index([role])
 }
 
@@ -278,12 +288,74 @@ model Channel {
   updatedAt               DateTime            @updatedAt
   deletedAt               DateTime?
 
-  customers       Customer[]
-  commissions     Commission[]
-  ledgers         ChannelLedger[]
-  commissionRules ChannelCommissionRule[]
+  customers          Customer[]
+  commissions        Commission[]
+  ledgers            ChannelLedger[]
+  commissionRules    ChannelCommissionRule[]
+  maintenanceRecords ChannelMaintenanceRecord[]
+  expenses           ChannelExpense[]
 
   @@index([channelType])
+}
+
+// 渠道维护记录：独立于个人客户跟进及渠道结算。
+model ChannelMaintenanceRecord {
+  id                Int       @id @default(autoincrement())
+  channelId         Int
+  maintainedAt      DateTime  @db.Date
+  content           String
+  nextMaintenanceAt DateTime? @db.Date
+  createdById       Int
+  requestId         String    @unique
+  requestHash       String
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  deletedAt         DateTime?
+
+  channel   Channel @relation(fields: [channelId], references: [id])
+  createdBy User    @relation(fields: [createdById], references: [id])
+
+  @@index([channelId, maintainedAt])
+  @@index([deletedAt, maintainedAt])
+  @@index([createdById])
+}
+
+// 公关费用只记录实际支出，不参与客户收付款、分成及往来台账计算。
+model ChannelExpense {
+  id          Int                    @id @default(autoincrement())
+  channelId   Int
+  incurredAt  DateTime               @db.Date
+  category    ChannelExpenseCategory
+  amount      Decimal                @db.Decimal(14, 2)
+  currency    Currency
+  note        String?
+  createdById Int
+  requestId   String                 @unique
+  requestHash String
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  deletedAt   DateTime?
+
+  channel   Channel                @relation(fields: [channelId], references: [id])
+  createdBy User                   @relation(fields: [createdById], references: [id])
+  receipt   ChannelExpenseReceipt?
+
+  @@index([channelId, incurredAt])
+  @@index([deletedAt, incurredAt, currency])
+  @@index([createdById])
+}
+
+// 小型凭证随数据库持久保存，仅通过授权后的接口下载，不使用公开文件地址。
+model ChannelExpenseReceipt {
+  id          Int      @id @default(autoincrement())
+  expenseId   Int      @unique
+  fileName    String
+  contentType String
+  size        Int
+  data        Bytes
+  createdAt   DateTime @default(now())
+
+  expense ChannelExpense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
 }
 
 // 渠道分成规则（MVP：实收比例 + 固定金额）

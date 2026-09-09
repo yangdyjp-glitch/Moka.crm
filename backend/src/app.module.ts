@@ -7,6 +7,7 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { ProductsModule } from './products/products.module';
 import { ChannelsModule } from './channels/channels.module';
+import { ChannelMaintenanceModule } from './channel-maintenance/channel-maintenance.module';
 import { CustomersModule } from './customers/customers.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -30,6 +31,7 @@ import { RolesGuard } from './auth/roles.guard';
     UsersModule,
     ProductsModule,
     ChannelsModule,
+    ChannelMaintenanceModule,
     CustomersModule,
     OrdersModule,
     PaymentsModule,
